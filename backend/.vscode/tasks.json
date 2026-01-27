@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Smoke test diagnostic (node script)",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"scripts/test_diagnostic.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

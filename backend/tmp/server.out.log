@@ -1,0 +1,19 @@
+AI Learning backend listening on http://localhost:4000
+Pinecone indexes: {
+  indexes: [
+    {
+      name: 'ai-learning',
+      dimension: 1024,
+      metric: 'cosine',
+      host: 'ai-learning-gwhugq4.svc.aped-4627-b74a.pinecone.io',
+      privateHost: undefined,
+      deletionProtection: 'disabled',
+      tags: undefined,
+      embed: [Object],
+      spec: [Object],
+      status: [Object],
+      vectorType: 'dense'
+    }
+  ]
+}
+Postgres tables ensured, using database for persistence.
