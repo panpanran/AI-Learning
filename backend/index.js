@@ -426,10 +426,57 @@ const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL || process.env.PG_CONNECTION_STRING });
 let useDb = false;
 
+// Simple in-memory "DB" fallback. Must be defined before handlers that may reference it.
+const users = {};
+
+// Lazy DB init: create tables on first meaningful request (e.g. register/login)
+// rather than only at process startup. This avoids one-shot failures on cold start,
+// and makes schema creation happen exactly when the app is actually used.
+let dbInitPromise = null;
+let lastDbInitAttemptAtMs = 0;
+let lastDbInitOk = null; // null | true | false
+
+function getDbInitRetryMs() {
+    const raw = process.env.DB_INIT_RETRY_MS;
+    const n = raw != null ? Number(raw) : NaN;
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 30000;
+}
+
+async function ensureDbInitialized() {
+    if (useDb) return { ok: true, useDb: true, attempted: false };
+    if (process.env.NODE_ENV === 'test') return { ok: false, useDb: false, attempted: false, reason: 'test' };
+
+    if (dbInitPromise) {
+        await dbInitPromise;
+        return { ok: useDb === true, useDb, attempted: true, shared: true };
+    }
+
+    const now = Date.now();
+    const retryMs = getDbInitRetryMs();
+    if (lastDbInitOk === false && retryMs > 0 && (now - lastDbInitAttemptAtMs) < retryMs) {
+        return { ok: false, useDb: false, attempted: false, throttled: true };
+    }
+
+    lastDbInitAttemptAtMs = now;
+    dbInitPromise = (async () => {
+        await ensureTables();
+        lastDbInitOk = (useDb === true);
+    })().finally(() => {
+        dbInitPromise = null;
+    });
+
+    await dbInitPromise;
+    return { ok: useDb === true, useDb, attempted: true, shared: false };
+}
+
 // 检查用户名是否已存在（注册唯一性校验）
 app.post('/auth/check-username', async (req, res) => {
     const { username } = req.body;
     if (!username) return res.status(400).json({ error: '用户名不能为空' });
+
+    // Create schema lazily on first auth-related request.
+    await ensureDbInitialized();
+
     if (useDb) {
         try {
             const result = await pool.query('SELECT * FROM users WHERE username=$1', [username]);
@@ -601,27 +648,7 @@ async function ensureTables() {
             }
         } catch (e) { }
 
-        await pool.query(`CREATE TABLE IF NOT EXISTS questions (
-                id SERIAL PRIMARY KEY,
-                content_cn TEXT,
-                content_en TEXT,
-                options JSONB,
-                content_options_hash TEXT,
-                metadata JSONB,
-                embedding DOUBLE PRECISION[],
-                answer_cn TEXT,
-                answer_en TEXT,
-                explanation_cn TEXT,
-                explanation_en TEXT,
-            knowledge_point_id INTEGER,
-                grade_id INTEGER REFERENCES grades(id),
-                subject_id INTEGER REFERENCES subjects(id)
-            )`);
-        // Remove legacy grade/subject columns if they exist
-        try { await pool.query('ALTER TABLE questions DROP COLUMN IF EXISTS grade'); } catch (e) { }
-        try { await pool.query('ALTER TABLE questions DROP COLUMN IF EXISTS subject'); } catch (e) { }
-        // 后端所有逻辑请勿再使用 questions.grade 或 subject 字段，只用 grade_id/subject_id。
-
+        // NOTE: Create referenced tables (grades/subjects) before any FK constraints.
         // 新增 grades 表
         await pool.query(`CREATE TABLE IF NOT EXISTS grades (
             id SERIAL PRIMARY KEY,
@@ -650,6 +677,27 @@ async function ensureTables() {
             subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
             description TEXT
         )`);
+
+        await pool.query(`CREATE TABLE IF NOT EXISTS questions (
+                id SERIAL PRIMARY KEY,
+                content_cn TEXT,
+                content_en TEXT,
+                options JSONB,
+                content_options_hash TEXT,
+                metadata JSONB,
+                embedding DOUBLE PRECISION[],
+                answer_cn TEXT,
+                answer_en TEXT,
+                explanation_cn TEXT,
+                explanation_en TEXT,
+                knowledge_point_id INTEGER,
+                grade_id INTEGER REFERENCES grades(id),
+                subject_id INTEGER REFERENCES subjects(id)
+            )`);
+        // Remove legacy grade/subject columns if they exist
+        try { await pool.query('ALTER TABLE questions DROP COLUMN IF EXISTS grade'); } catch (e) { }
+        try { await pool.query('ALTER TABLE questions DROP COLUMN IF EXISTS subject'); } catch (e) { }
+        // 后端所有逻辑请勿再使用 questions.grade 或 subject 字段，只用 grade_id/subject_id。
 
         // For existing DBs created before we added columns
         try { await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS grade TEXT'); } catch (e) { }
@@ -860,7 +908,8 @@ async function ensureTables() {
 
 // Meta endpoints for DB-driven cascading dropdowns
 app.get('/api/meta/grades', async (req, res) => {
-    if (!useDb) return res.json({ grades: [] });
+    await ensureDbInitialized();
+    if (!useDb) return res.json({ grades: [], dbDisabled: true });
     try {
         const r = await pool.query('SELECT id, code, level, name_zh, name_en, stage, sequence FROM grades ORDER BY sequence NULLS LAST, id ASC');
         return res.json({ grades: r.rows });
@@ -870,7 +919,8 @@ app.get('/api/meta/grades', async (req, res) => {
 });
 
 app.get('/api/meta/subjects', async (req, res) => {
-    if (!useDb) return res.json({ subjects: [] });
+    await ensureDbInitialized();
+    if (!useDb) return res.json({ subjects: [], dbDisabled: true });
     try {
         const r = await pool.query('SELECT id, code, name_zh, name_en, icon, is_active FROM subjects WHERE is_active = TRUE ORDER BY code ASC');
         return res.json({ subjects: r.rows });
@@ -880,7 +930,8 @@ app.get('/api/meta/subjects', async (req, res) => {
 });
 
 app.get('/api/meta/grade-subjects', async (req, res) => {
-    if (!useDb) return res.json({ items: [] });
+    await ensureDbInitialized();
+    if (!useDb) return res.json({ items: [], dbDisabled: true });
     const gradeId = req.query && req.query.grade_id != null ? Number(req.query.grade_id) : null;
     if (!gradeId) return res.status(400).json({ error: 'grade_id required' });
     try {
@@ -902,6 +953,81 @@ app.get('/api/meta/grade-subjects', async (req, res) => {
     } catch (e) {
         return res.status(500).json({ error: 'DB error' });
     }
+});
+
+// Debug endpoint to verify which DB this server is actually connected to.
+// Requires JWT auth by default. You can make it public in controlled environments by setting DEBUG_DB_INFO_PUBLIC=1.
+app.get('/api/_debug/db-info', async (req, res) => {
+    const isPublic = String(process.env.DEBUG_DB_INFO_PUBLIC || '') === '1';
+    if (!isPublic) {
+        const auth = req.headers.authorization;
+        if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+        const token = auth.replace('Bearer ', '');
+        try {
+            jwt.verify(token, JWT_SECRET);
+        } catch {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+    }
+
+    const init = await ensureDbInitialized();
+    const out = {
+        useDb,
+        init,
+        db: null,
+        publicTables: [],
+        counts: {},
+    };
+
+    if (!useDb) {
+        return res.json(out);
+    }
+
+    try {
+        const ident = await pool.query(
+            `SELECT
+                current_database() AS db,
+                current_user AS user,
+                inet_server_addr()::text AS server_addr,
+                inet_server_port() AS server_port,
+                inet_client_addr()::text AS client_addr`
+        );
+        out.db = ident.rows && ident.rows[0] ? ident.rows[0] : null;
+    } catch (e) {
+        out.db = { error: e && e.message ? e.message : String(e) };
+    }
+
+    try {
+        const tablesRes = await pool.query(
+            `SELECT table_name
+             FROM information_schema.tables
+             WHERE table_schema='public' AND table_type='BASE TABLE'
+             ORDER BY table_name ASC`
+        );
+        out.publicTables = (tablesRes.rows || []).map(r => r.table_name);
+    } catch (e) {
+        out.publicTables = [];
+    }
+
+    const safeCount = async (tableName) => {
+        try {
+            const r = await pool.query(`SELECT COUNT(1)::int AS c FROM ${tableName}`);
+            return (r.rows && r.rows[0]) ? r.rows[0].c : null;
+        } catch {
+            return null;
+        }
+    };
+
+    out.counts = {
+        users: await safeCount('users'),
+        grades: await safeCount('grades'),
+        subjects: await safeCount('subjects'),
+        grade_subjects: await safeCount('grade_subjects'),
+        questions: await safeCount('questions'),
+        history: await safeCount('history'),
+    };
+
+    return res.json(out);
 });
 
 function normalizeOptions(options) {
@@ -1837,10 +1963,8 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     };
 }
 
-ensureTables().catch(e => console.error('ensureTables error', e));
-
-// Simple in-memory "DB" for demo (replace with sqlite3 or Postgres)
-const users = {};
+// NOTE: Postgres tables are initialized lazily (see ensureDbInitialized), so we
+// don't call ensureTables() eagerly at process startup.
 
 
 function generateToken(user) {
@@ -1852,6 +1976,9 @@ function generateToken(user) {
 app.post('/auth/mock-login', async (req, res) => {
     const { username, password, mode } = req.body;
     if (!username || !password) return res.status(400).json({ error: '用户名和密码不能为空' });
+
+    // Ensure all tables exist during register/login (lazy init).
+    await ensureDbInitialized();
 
     if (useDb) {
         try {

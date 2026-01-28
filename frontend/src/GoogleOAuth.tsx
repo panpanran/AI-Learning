@@ -30,6 +30,7 @@ export function loadGoogleScript(onLoad?: () => void) {
 
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import API from './api';
 
 type Mode = 'login' | 'register';
 
@@ -54,35 +55,31 @@ export default function LocalAuth() {
                 return;
             }
             try {
-                const resp = await fetch('/auth/mock-login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, mode: 'register' })
-                });
-                const data = await resp.json();
-                if (!resp.ok) {
-                    setError(t(data.error) || t('register_failed'));
+                const resp = await API.post('/auth/mock-login', { username, password, mode: 'register' });
+                const data = resp?.data;
+                if (!data || !data.token) {
+                    setError(t('register_failed'));
                     return;
                 }
                 alert(t('register_success'));
             } catch (e) {
-                setError(t('network_error'));
+                const err: any = e;
+                const msg = err?.response?.data?.error || err?.message;
+                setError(msg ? (t(String(msg)) || String(msg)) : t('network_error'));
             }
         } else {
             try {
-                const resp = await fetch('/auth/mock-login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, mode: 'login' })
-                });
-                const data = await resp.json();
-                if (!resp.ok) {
-                    setError(t(data.error) || t('login_failed'));
+                const resp = await API.post('/auth/mock-login', { username, password, mode: 'login' });
+                const data = resp?.data;
+                if (!data || !data.token) {
+                    setError(t('login_failed'));
                     return;
                 }
                 alert(t('login_success'));
             } catch (e) {
-                setError(t('network_error'));
+                const err: any = e;
+                const msg = err?.response?.data?.error || err?.message;
+                setError(msg ? (t(String(msg)) || String(msg)) : t('network_error'));
             }
         }
     };

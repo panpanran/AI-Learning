@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import API from './api';
 
 type Mode = 'login' | 'register';
 
@@ -26,14 +27,10 @@ export default function LocalAuth() {
                 return;
             }
             try {
-                const resp = await fetch('/auth/mock-login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, mode: 'register' })
-                });
-                const data = await resp.json();
-                if (!resp.ok) {
-                    setError(t(data.error) || t('register_failed'));
+                const resp = await API.post('/auth/mock-login', { username, password, mode: 'register' });
+                const data = resp?.data;
+                if (!data || !data.token) {
+                    setError(t('register_failed'));
                     return;
                 }
                 // 注册成功，保存 token/user 并跳转
@@ -41,18 +38,16 @@ export default function LocalAuth() {
                 localStorage.setItem('user', JSON.stringify(data.user));
                 navigate('/app');
             } catch (e) {
-                setError(t('network_error'));
+                const err: any = e;
+                const msg = err?.response?.data?.error || err?.message;
+                setError(msg ? (t(String(msg)) || String(msg)) : t('network_error'));
             }
         } else {
             try {
-                const resp = await fetch('/auth/mock-login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, mode: 'login' })
-                });
-                const data = await resp.json();
-                if (!resp.ok) {
-                    setError(t(data.error) || t('login_failed'));
+                const resp = await API.post('/auth/mock-login', { username, password, mode: 'login' });
+                const data = resp?.data;
+                if (!data || !data.token) {
+                    setError(t('login_failed'));
                     return;
                 }
                 // 登录成功，保存 token/user 并跳转
@@ -60,7 +55,9 @@ export default function LocalAuth() {
                 localStorage.setItem('user', JSON.stringify(data.user));
                 navigate('/app');
             } catch (e) {
-                setError(t('network_error'));
+                const err: any = e;
+                const msg = err?.response?.data?.error || err?.message;
+                setError(msg ? (t(String(msg)) || String(msg)) : t('network_error'));
             }
         }
     };
