@@ -1157,11 +1157,11 @@ function coerceEmbeddingArray(v) {
     return null;
 }
 
-async function dedupeQuestionsByHistoryMetadataSemantic({ questions, pcClient, userIds, gradeId, subjectId }) {
+async function dedupeQuestionsByHistoryMetadataSemantic({ questions, pcClient, userIds, gradeId, subjectId, cfgOverride = null }) {
     const list = Array.isArray(questions) ? questions : [];
     if (!list.length) return [];
     if (!useDb) return list;
-    const cfg = getPineconeQuestionDedupeConfig();
+    const cfg = (cfgOverride && typeof cfgOverride === 'object') ? { ...getPineconeQuestionDedupeConfig(), ...cfgOverride } : getPineconeQuestionDedupeConfig();
     if (!cfg.enabled) return list;
     if (!pcClient || typeof pcClient.queryByVector !== 'function') return list;
     if (!Number.isInteger(Number(gradeId)) || !Number.isInteger(Number(subjectId))) return list;
@@ -1280,8 +1280,8 @@ async function dedupeQuestionsByHistoryMetadataSemantic({ questions, pcClient, u
     return out;
 }
 
-async function dedupeQuestionsBeforeInsert({ questions, pcClient, userIds, gradeId, subjectId }) {
-    const cfg = getPineconeQuestionDedupeConfig();
+async function dedupeQuestionsBeforeInsert({ questions, pcClient, userIds, gradeId, subjectId, cfgOverride = null }) {
+    const cfg = (cfgOverride && typeof cfgOverride === 'object') ? { ...getPineconeQuestionDedupeConfig(), ...cfgOverride } : getPineconeQuestionDedupeConfig();
 
     // Layer 1: local stable hash dedupe
     const withHash = (Array.isArray(questions) ? questions : []).map(q => ensureContentOptionsHash(q));
@@ -1342,6 +1342,7 @@ async function dedupeQuestionsBeforeInsert({ questions, pcClient, userIds, grade
         userIds,
         gradeId,
         subjectId,
+        cfgOverride: cfgOverride,
     });
 
     return layer4;
@@ -1557,6 +1558,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     knowledgePointId = null,
     preferredKnowledgePointIds = null,
     avoidMetadataKnowledgePointId = null,
+    dedupeCfgOverride = null,
     promptCtx,
     logFn = null,
 }) {
@@ -1951,6 +1953,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
             userIds: studentUserIds,
             gradeId: Number(gradeId),
             subjectId: Number(subjectId),
+            cfgOverride: dedupeCfgOverride,
         });
     } catch {
         acceptedForInsert = accepted;
@@ -2688,7 +2691,7 @@ app.post('/api/generate/diagnostic', async (req, res) => {
         }
 
         let questionsOut = (genRes && genRes.questionsOut) ? genRes.questionsOut : [];
-        const accepted = (genRes && genRes.generatedQuestions) ? genRes.generatedQuestions : [];
+        let accepted = (genRes && genRes.generatedQuestions) ? genRes.generatedQuestions : [];
         const genLesson = (genRes && genRes.generatedLesson) ? genRes.generatedLesson : null;
 
         diagLog('[diagnostic] questionsOut.length after selection =', questionsOut.length);
@@ -2697,9 +2700,22 @@ app.post('/api/generate/diagnostic', async (req, res) => {
             diagLog('[diagnostic] still not enough after DB fetch; will insert GPT-generated questions');
             let returnPool = accepted;
 
+            const baseQuestionDedupeCfg = getPineconeQuestionDedupeConfig();
+
+            const clamp01 = (x) => {
+                const n = Number(x);
+                if (!Number.isFinite(n)) return null;
+                return Math.max(0, Math.min(0.999, n));
+            };
+
+            // Try to always return exactly numQuestions.
+            // We progressively relax dedupe (raise thresholds / disable layers) if we can't fill.
+            const maxFillAttempts = Math.max(1, Math.min(4, Number(process.env.DIAGNOSTIC_FILL_ATTEMPTS) || 3));
+            let attempt = 0;
+
             // Optional semantic de-dup vs existing Postgres questions (global within grade+subject).
             const enableSemanticDedupe = process.env.SEMANTIC_DEDUPE === '1';
-            const semanticThreshold = getSimilarityThreshold('SEMANTIC_DEDUPE_THRESHOLD', 0.92);
+            const semanticThresholdBase = getSimilarityThreshold('SEMANTIC_DEDUPE_THRESHOLD', 0.92);
 
             let existingEmbeddings = [];
             if (enableSemanticDedupe) {
@@ -2750,8 +2766,8 @@ app.post('/api/generate/diagnostic', async (req, res) => {
 
             // Optional metadata-based dedupe via Pinecone cosine similarity.
             // This compares metadata embeddings, not raw question text.
-            const enableMetadataDedupe = true;
-            const metadataThreshold = getSimilarityThreshold('METADATA_DEDUPE_THRESHOLD', 0.9);
+            const enableMetadataDedupeBase = true;
+            const metadataThresholdBase = getSimilarityThreshold('METADATA_DEDUPE_THRESHOLD', 0.9);
 
             const pcForMetadata = (() => {
                 try {
@@ -2763,65 +2779,115 @@ app.post('/api/generate/diagnostic', async (req, res) => {
                 }
             })();
 
+            const maybeRegenerate = async (needCount, relaxStep) => {
+                try {
+                    const relaxed = clamp01(Math.max(Number(baseQuestionDedupeCfg.threshold) || 0.9, 0.9) + (Number(relaxStep) || 0) * 0.04);
+                    const regenRes = await dbFirstSelectAndMaybeGenerateWithGpt({
+                        numQuestions: Math.max(1, Math.min(20, Number(needCount) || 1)),
+                        studentUserIds,
+                        gradeId: useGradeId,
+                        subjectId: useSubjectId,
+                        knowledgePointId: null,
+                        preferredKnowledgePointIds: (focusKnowledgePoints && focusKnowledgePoints.length) ? focusKnowledgePoints : null,
+                        avoidMetadataKnowledgePointId: null,
+                        dedupeCfgOverride: {
+                            enabled: true,
+                            threshold: (relaxed != null ? relaxed : 0.95),
+                            topK: baseQuestionDedupeCfg.topK,
+                        },
+                        promptCtx: {
+                            useLang,
+                            student_profile: { id: user.id, grade: gradeDisplayName, subject: subjectDisplayName, lang: useLang, focus_knowledge_points: focusKnowledgePoints },
+                            knowledgePointsForPrompt,
+                            allowedKnowledgePointIds,
+                            buildKnowledgePointIdsPlan,
+                            max_tokens: 5000,
+                        },
+                        logFn: diagLog,
+                    });
+                    const newAccepted = (regenRes && regenRes.generatedQuestions) ? regenRes.generatedQuestions : [];
+                    if (Array.isArray(newAccepted) && newAccepted.length) {
+                        accepted = accepted.concat(newAccepted);
+                        returnPool = accepted;
+                        diagLog('[diagnostic] regenerated candidates:', { added: newAccepted.length, total_pool: returnPool.length, relaxStep });
+                    }
+                } catch (e) {
+                    diagLog('[diagnostic] regeneration failed:', e && e.message ? e.message : String(e));
+                }
+            };
+
             // Insert ONLY the questions we will return (so returned ids always exist in Postgres and match the screen).
             // Dedupe at insertion time is global (metadata + DB semantic + content_options_hash constraint).
-            for (const q of returnPool) {
-                if (questionsOut.length >= numQuestions) break;
+            while (questionsOut.length < numQuestions && attempt < maxFillAttempts) {
+                const relaxStep = attempt;
+                const enableMetadataDedupe = enableMetadataDedupeBase && relaxStep < 2;
+                const enableSemanticDedupeThisAttempt = enableSemanticDedupe && relaxStep < 1;
+                const metadataThreshold = clamp01(Math.max(Number(metadataThresholdBase) || 0.9, 0.9) + relaxStep * 0.04) ?? 0.95;
+                const semanticThreshold = clamp01(Math.max(Number(semanticThresholdBase) || 0.92, 0.92) + relaxStep * 0.03) ?? 0.96;
 
-                if (enableMetadataDedupe && pcForMetadata && q) {
-                    try {
-                        const metaText = buildQuestionDedupeEmbeddingText(q, {
-                            gradeId: useGradeId,
-                            subjectId: useSubjectId,
-                            knowledgePointId: q.knowledge_point_id || null,
-                        });
-                        if (metaText) {
-                            // IMPORTANT: always use Pinecone embeddings for Pinecone query/upsert.
-                            // Using q.embedding here can cause dimension mismatch (e.g. OpenAI 1536 vs Pinecone index dims)
-                            // and failures would be swallowed.
-                            const v = ((await pcForMetadata.embedTexts([metaText], 'query')) || [])[0] || null;
-                            if (v && Array.isArray(v) && v.length) {
-                                const filter = {
-                                    kind: { "$eq": "question_metadata" },
-                                    grade_id: { "$eq": useGradeId },
-                                    subject_id: { "$eq": useSubjectId },
-                                };
-                                const pq = await pcForMetadata.queryByVector(v, 3, filter);
-                                const matches = (pq && pq.matches) ? pq.matches : [];
-                                const best = matches.length ? Number(matches[0].score) : NaN;
-                                if (Number.isFinite(best) && best >= metadataThreshold) {
-                                    diagLog('[diagnostic] metadata-dedupe skip (pinecone score):', { score: best, threshold: metadataThreshold, expression: q.metadata && q.metadata.expression });
-                                    continue;
+                // If pool is too small, try regenerating more.
+                if (!Array.isArray(returnPool) || returnPool.length < (numQuestions - questionsOut.length)) {
+                    await maybeRegenerate(numQuestions - questionsOut.length, relaxStep);
+                }
+
+                const beforeLen = questionsOut.length;
+                for (const q of (returnPool || [])) {
+                    if (questionsOut.length >= numQuestions) break;
+
+                    if (enableMetadataDedupe && pcForMetadata && q) {
+                        try {
+                            const metaText = buildQuestionDedupeEmbeddingText(q, {
+                                gradeId: useGradeId,
+                                subjectId: useSubjectId,
+                                knowledgePointId: q.knowledge_point_id || null,
+                            });
+                            if (metaText) {
+                                // IMPORTANT: always use Pinecone embeddings for Pinecone query/upsert.
+                                // Using q.embedding here can cause dimension mismatch (e.g. OpenAI 1536 vs Pinecone index dims)
+                                // and failures would be swallowed.
+                                const v = ((await pcForMetadata.embedTexts([metaText], 'query')) || [])[0] || null;
+                                if (v && Array.isArray(v) && v.length) {
+                                    const filter = {
+                                        kind: { "$eq": "question_metadata" },
+                                        grade_id: { "$eq": useGradeId },
+                                        subject_id: { "$eq": useSubjectId },
+                                    };
+                                    const pq = await pcForMetadata.queryByVector(v, 3, filter);
+                                    const matches = (pq && pq.matches) ? pq.matches : [];
+                                    const best = matches.length ? Number(matches[0].score) : NaN;
+                                    if (Number.isFinite(best) && best >= metadataThreshold) {
+                                        diagLog('[diagnostic] metadata-dedupe skip (pinecone score):', { score: best, threshold: metadataThreshold, expression: q.metadata && q.metadata.expression });
+                                        continue;
+                                    }
                                 }
                             }
-                        }
-                    } catch (e) {
-                        // If Pinecone fails, fall back to DB insert path.
-                        diagLog('[diagnostic] metadata-dedupe pinecone query failed:', e && e.message ? e.message : String(e));
-                    }
-                }
-
-                if (enableSemanticDedupe && Array.isArray(q.embedding) && existingEmbeddings.length) {
-                    let best = -1;
-                    let bestId = null;
-                    for (const ex of existingEmbeddings) {
-                        const s = cosineSimilarity(q.embedding, ex.embedding);
-                        if (s > best) {
-                            best = s;
-                            bestId = ex.id;
+                        } catch (e) {
+                            // If Pinecone fails, fall back to DB insert path.
+                            diagLog('[diagnostic] metadata-dedupe pinecone query failed:', e && e.message ? e.message : String(e));
                         }
                     }
-                    if (best >= semanticThreshold) {
-                        diagLog('[diagnostic] semantic-dedupe skip (db similarity):', { similarity: best, existing_id: bestId });
-                        continue;
-                    }
-                }
 
-                let insertedId = null;
-                try {
-                    // Upsert by content_options_hash; let SERIAL id auto-generate.
-                    const ins = await pool.query(
-                        `INSERT INTO questions(content_cn, content_en, options, content_options_hash, metadata, embedding, answer_cn, answer_en, explanation_cn, explanation_en, knowledge_point_id, grade_id, subject_id)
+                    if (enableSemanticDedupeThisAttempt && Array.isArray(q.embedding) && existingEmbeddings.length) {
+                        let best = -1;
+                        let bestId = null;
+                        for (const ex of existingEmbeddings) {
+                            const s = cosineSimilarity(q.embedding, ex.embedding);
+                            if (s > best) {
+                                best = s;
+                                bestId = ex.id;
+                            }
+                        }
+                        if (best >= semanticThreshold) {
+                            diagLog('[diagnostic] semantic-dedupe skip (db similarity):', { similarity: best, existing_id: bestId });
+                            continue;
+                        }
+                    }
+
+                    let insertedId = null;
+                    try {
+                        // Upsert by content_options_hash; let SERIAL id auto-generate.
+                        const ins = await pool.query(
+                            `INSERT INTO questions(content_cn, content_en, options, content_options_hash, metadata, embedding, answer_cn, answer_en, explanation_cn, explanation_en, knowledge_point_id, grade_id, subject_id)
                          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                          ON CONFLICT (content_options_hash) DO UPDATE
                          SET content_cn = EXCLUDED.content_cn,
@@ -2837,87 +2903,113 @@ app.post('/api/generate/diagnostic', async (req, res) => {
                              grade_id = EXCLUDED.grade_id,
                              subject_id = EXCLUDED.subject_id
                          RETURNING id`,
-                        [
-                            q.content_cn,
-                            q.content_en,
-                            JSON.stringify(q.options),
-                            q.content_options_hash,
-                            q.metadata ? JSON.stringify(q.metadata) : null,
-                            Array.isArray(q.embedding) ? q.embedding : null,
-                            q.answer_cn,
-                            q.answer_en,
-                            q.explanation_cn,
-                            q.explanation_en,
-                            q.knowledge_point_id || null,
-                            useGradeId,
-                            useSubjectId
-                        ]
-                    );
-                    insertedId = ins.rows[0] ? Number(ins.rows[0].id) : null;
-                } catch (e) { }
+                            [
+                                q.content_cn,
+                                q.content_en,
+                                JSON.stringify(q.options),
+                                q.content_options_hash,
+                                q.metadata ? JSON.stringify(q.metadata) : null,
+                                Array.isArray(q.embedding) ? q.embedding : null,
+                                q.answer_cn,
+                                q.answer_en,
+                                q.explanation_cn,
+                                q.explanation_en,
+                                q.knowledge_point_id || null,
+                                useGradeId,
+                                useSubjectId
+                            ]
+                        );
+                        insertedId = ins.rows[0] ? Number(ins.rows[0].id) : null;
+                    } catch (e) { }
 
-                if (!Number.isInteger(insertedId)) {
-                    try {
-                        const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 LIMIT 1', [q.content_options_hash]);
-                        insertedId = sel.rows[0] ? Number(sel.rows[0].id) : null;
-                    } catch (e) {
-                        insertedId = null;
-                    }
-                }
-
-                // If we couldn't obtain a stable DB id, do not return it (submit would not be able to record history correctly).
-                if (!Number.isInteger(insertedId)) {
-                    continue;
-                }
-
-                // Upsert metadata vector for future dedupe/retrieval.
-                if (enableMetadataDedupe && pcForMetadata && Number.isInteger(insertedId) && q) {
-                    try {
-                        const metaText = buildQuestionDedupeEmbeddingText(q, {
-                            gradeId: useGradeId,
-                            subjectId: useSubjectId,
-                            knowledgePointId: q.knowledge_point_id || null,
-                        });
-                        if (metaText) {
-                            // IMPORTANT: always use Pinecone embeddings for Pinecone upsert (dimension must match index).
-                            const v = ((await pcForMetadata.embedTexts([metaText], 'passage')) || [])[0] || null;
-                            if (v && Array.isArray(v) && v.length) {
-                                const md = {
-                                    kind: 'question_metadata',
-                                    question_id: insertedId,
-                                    grade_id: useGradeId,
-                                    subject_id: useSubjectId,
-                                    knowledge_point_id: q.knowledge_point_id || null,
-                                    expression: q.metadata && q.metadata.expression ? String(q.metadata.expression) : null,
-                                    content_options_hash: q.content_options_hash || null,
-                                };
-                                await pcForMetadata.upsertVectors([{ id: `qmeta:${insertedId}`, values: v, metadata: md }]);
-                                diagLog('[diagnostic] pinecone upserted question_metadata:', { id: `qmeta:${insertedId}`, grade_id: useGradeId, subject_id: useSubjectId });
-                            }
+                    if (!Number.isInteger(insertedId)) {
+                        try {
+                            const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 LIMIT 1', [q.content_options_hash]);
+                            insertedId = sel.rows[0] ? Number(sel.rows[0].id) : null;
+                        } catch (e) {
+                            insertedId = null;
                         }
-                    } catch (e) {
-                        // Non-fatal.
-                        diagLog('[diagnostic] pinecone upsert failed:', e && e.message ? e.message : String(e));
                     }
+
+                    // If we couldn't obtain a stable DB id, do not return it (submit would not be able to record history correctly).
+                    if (!Number.isInteger(insertedId)) {
+                        continue;
+                    }
+
+                    // Upsert metadata vector for future dedupe/retrieval.
+                    if (enableMetadataDedupe && pcForMetadata && Number.isInteger(insertedId) && q) {
+                        try {
+                            const metaText = buildQuestionDedupeEmbeddingText(q, {
+                                gradeId: useGradeId,
+                                subjectId: useSubjectId,
+                                knowledgePointId: q.knowledge_point_id || null,
+                            });
+                            if (metaText) {
+                                // IMPORTANT: always use Pinecone embeddings for Pinecone upsert (dimension must match index).
+                                const v = ((await pcForMetadata.embedTexts([metaText], 'passage')) || [])[0] || null;
+                                if (v && Array.isArray(v) && v.length) {
+                                    const md = {
+                                        kind: 'question_metadata',
+                                        question_id: insertedId,
+                                        grade_id: useGradeId,
+                                        subject_id: useSubjectId,
+                                        knowledge_point_id: q.knowledge_point_id || null,
+                                        expression: q.metadata && q.metadata.expression ? String(q.metadata.expression) : null,
+                                        content_options_hash: q.content_options_hash || null,
+                                    };
+                                    await pcForMetadata.upsertVectors([{ id: `qmeta:${insertedId}`, values: v, metadata: md }]);
+                                    diagLog('[diagnostic] pinecone upserted question_metadata:', { id: `qmeta:${insertedId}`, grade_id: useGradeId, subject_id: useSubjectId });
+                                }
+                            }
+                        } catch (e) {
+                            // Non-fatal.
+                            diagLog('[diagnostic] pinecone upsert failed:', e && e.message ? e.message : String(e));
+                        }
+                    }
+
+                    questionsOut.push({
+                        id: Number.isInteger(insertedId) ? insertedId : null,
+                        type: q.type,
+                        content_cn: q.content_cn,
+                        content_en: q.content_en,
+                        options: q.options,
+                        content_options_hash: q.content_options_hash,
+                        metadata: q.metadata || null,
+                        answer_cn: q.answer_cn,
+                        answer_en: q.answer_en,
+                        explanation_cn: q.explanation_cn,
+                        explanation_en: q.explanation_en,
+                        knowledge_point_id: q.knowledge_point_id
+                    });
                 }
 
-                questionsOut.push({
-                    id: Number.isInteger(insertedId) ? insertedId : null,
-                    type: q.type,
-                    content_cn: q.content_cn,
-                    content_en: q.content_en,
-                    options: q.options,
-                    content_options_hash: q.content_options_hash,
-                    metadata: q.metadata || null,
-                    answer_cn: q.answer_cn,
-                    answer_en: q.answer_en,
-                    explanation_cn: q.explanation_cn,
-                    explanation_en: q.explanation_en,
-                    knowledge_point_id: q.knowledge_point_id
+                const addedThisAttempt = questionsOut.length - beforeLen;
+                diagLog('[diagnostic] fill attempt done:', {
+                    attempt,
+                    added: addedThisAttempt,
+                    now: questionsOut.length,
+                    need: numQuestions,
+                    enableMetadataDedupe,
+                    enableSemanticDedupe: enableSemanticDedupeThisAttempt,
+                    metadataThreshold,
+                    semanticThreshold,
                 });
+
+                attempt++;
             }
             // No final deduplication needed; questionsOut already deduped during insertion and earlier steps.
             questionsOut = questionsOut.slice(0, numQuestions);
+
+            if (questionsOut.length < numQuestions) {
+                // If we still can't reach the requested count, return a clear error instead of silently returning fewer.
+                // This avoids confusing UX and makes it obvious the thresholds/config need adjustment.
+                return res.status(500).json({
+                    error: 'Failed to generate enough unique questions',
+                    requested: numQuestions,
+                    returned: questionsOut.length,
+                    hint: 'Try increasing dedupe thresholds (e.g. set METADATA_DEDUPE_THRESHOLD=0.9+ and PINECONE_QUESTION_DEDUPE_THRESHOLD=0.9+) or reduce strictness. You can also increase DIAGNOSTIC_FILL_ATTEMPTS.',
+                });
+            }
 
             // Validate with AJV schema if available
             if (validateDiagnostic) {
