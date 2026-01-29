@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import API from './api'
+import TtsSpeakButton from './TtsSpeakButton'
 
 type ResultItem = {
     questionId: number | string
@@ -228,7 +229,16 @@ function Results() {
 
                                         {content ? (
                                             <div style={{ marginTop: 10 }}>
-                                                <div><strong>{t('question')}：</strong> {content}</div>
+                                                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                                                    <div style={{ flex: 1 }}><strong>{t('question')}：</strong> {content}</div>
+                                                    <TtsSpeakButton
+                                                        lang={lang}
+                                                        text={String(content || '')}
+                                                        options={[]}
+                                                        className="btn"
+                                                        title={lang === 'zh' ? '朗读题目' : 'Read question'}
+                                                    />
+                                                </div>
                                             </div>
                                         ) : null}
 

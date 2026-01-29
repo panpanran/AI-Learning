@@ -1,4 +1,4 @@
-$login = Invoke-RestMethod -Uri 'http://localhost:4000/auth/mock-login' -Method Post -ContentType 'application/json' -Body (@{ username = 'panpanr'; password = '123'; mode = 'login' } | ConvertTo-Json)
+$login = Invoke-RestMethod -Uri 'https://ai-learning-backend-vm34.onrender.com/auth/mock-login' -Method Post -ContentType 'application/json' -Body (@{ username = 'maxpan'; password = '123'; mode = 'login' } | ConvertTo-Json)
 $token = $login.token
 
 # Optional: set to $null to omit knowledge_point_id entirely
@@ -6,15 +6,14 @@ $knowledgePointId = $null
 
 $payload = @{
     metadata            = @{
-        # nums    = @(7)
-        type    = 'vocabulary'
-        context = 'fruit'
-        word    = "苹果"
+        nums    = @(5432，5)
+        type    = 'other'
+        context = 'place value of digit'
     }
 
     topK                = 5
-    grade_id            = 4
-    subject_id          = 2
+    grade_id            = 3
+    subject_id          = 1
     includeQuestionRows = $true
 
     # compareMode:
@@ -33,7 +32,7 @@ if ($null -ne $knowledgePointId) {
 
 $body = $payload | ConvertTo-Json -Depth 10
 
-Invoke-RestMethod -Uri 'http://localhost:4000/api/pinecone/query-metadata' `
+Invoke-RestMethod -Uri 'https://ai-learning-backend-vm34.onrender.com/api/pinecone/query-metadata' `
     -Method Post `
     -Headers @{ Authorization = "Bearer $token" } `
     -ContentType 'application/json' `

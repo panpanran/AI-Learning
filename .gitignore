@@ -1,0 +1,18 @@
+# 忽略任何目录下的 node_modules 文件夹
+**/node_modules/
+
+# 忽略任何目录下的构建缓存
+**/.vite/
+**/dist/
+
+# Env 文件
+.env
+.env.local
+**/.env*
+
+# VS Code
+.vscode/
+
+# Logs
+logs/
+*.log

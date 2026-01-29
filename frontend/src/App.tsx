@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import ScratchPad from './ScratchPad'
+import TtsSpeakButton from './TtsSpeakButton'
 import Notification from './Notification'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
@@ -156,6 +157,39 @@ function App() {
     const [loadingHistory, setLoadingHistory] = useState(false)
     const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
 
+    const gradeOptions = useMemo(() => grades || [], [grades])
+    const subjectOptions = useMemo(() => gradeSubjects || [], [gradeSubjects])
+
+    const selectedSubject = useMemo(() => {
+        const sid = String(subjectId || '')
+        if (!sid) return null
+        return (subjectOptions || []).find((s: any) => String(s?.subject_id ?? s?.id ?? '') === sid) || null
+    }, [subjectId, subjectOptions])
+
+    const lockedLangForSubject = useMemo(() => {
+        // Only lock on the question page, and only for the two language-subjects.
+        if (!hasSelected) return null
+
+        const nameEn = selectedSubject?.name_en != null ? String(selectedSubject.name_en) : ''
+        const nameZh = selectedSubject?.name_zh != null ? String(selectedSubject.name_zh) : ''
+        const code = selectedSubject?.subject_code != null ? String(selectedSubject.subject_code) : ''
+        const s = `${nameEn} ${nameZh} ${code}`.toLowerCase()
+
+        if (s.includes('chinese') || s.includes('语文') || s.includes('中文')) return 'zh'
+        if (s.includes('english') || s.includes('英语')) return 'en'
+        return null
+    }, [hasSelected, selectedSubject])
+
+    const effectiveLang = (lockedLangForSubject || (i18n.language === 'zh' ? 'zh' : 'en')) as 'zh' | 'en'
+
+    // If subject locks language on the question page, enforce it (and disable switching).
+    useEffect(() => {
+        if (!lockedLangForSubject) return
+        if (i18n.language === lockedLangForSubject) return
+        setLang(lockedLangForSubject)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [lockedLangForSubject])
+
     const prevGradeIdRef = useRef<string>('')
 
     const readLastSelection = () => {
@@ -232,7 +266,7 @@ function App() {
             (async () => {
                 try {
                     // 这里可根据 history 推荐错题/知识点，否则生成诊断题
-                    const payload = { token, numQuestions: 20, grade_id: parsedGradeId, subject_id: parsedSubjectId, lang: i18n.language }
+                    const payload = { token, numQuestions: 20, grade_id: parsedGradeId, subject_id: parsedSubjectId, lang: lockedLangForSubject || i18n.language }
                     feDiagLog('[fe][diagnostic] request /api/generate/diagnostic', {
                         hasSelected,
                         loadingDiagnostic,
@@ -280,7 +314,7 @@ function App() {
                 setLoadingDiagnostic(false)
             })();
         }
-    }, [token, hasSelected, diagnostic, loadingDiagnostic, gradeId, subjectId])
+    }, [token, hasSelected, diagnostic, loadingDiagnostic, gradeId, subjectId, diagnosticError, lockedLangForSubject, i18n.language])
 
     // Clear diagnosticError when user changes selection (so it can auto-generate again).
     useEffect(() => {
@@ -324,9 +358,6 @@ function App() {
             }
         })();
     }, [gradeId, hasSelected])
-
-    const gradeOptions = useMemo(() => grades || [], [grades])
-    const subjectOptions = useMemo(() => gradeSubjects || [], [gradeSubjects])
 
     return (
         <div className="app-root">
@@ -513,8 +544,18 @@ function App() {
                             </div>
 
                             <div className="lang-controls" style={{ position: 'static', display: 'flex', gap: 6 }}>
-                                <button className="btn" onClick={() => setLang('zh')}>中文</button>
-                                <button className="btn" onClick={() => setLang('en')}>EN</button>
+                                <button
+                                    className="btn"
+                                    disabled={!!lockedLangForSubject}
+                                    title={lockedLangForSubject ? (lockedLangForSubject === 'zh' ? '语文学科：语言已锁定为中文' : 'English subject: language locked') : undefined}
+                                    onClick={() => setLang('zh')}
+                                >中文</button>
+                                <button
+                                    className="btn"
+                                    disabled={!!lockedLangForSubject}
+                                    title={lockedLangForSubject ? (lockedLangForSubject === 'zh' ? '语文学科：语言已锁定为中文' : 'English subject: language locked') : undefined}
+                                    onClick={() => setLang('en')}
+                                >EN</button>
                             </div>
                         </div>
 
@@ -559,7 +600,7 @@ function App() {
                                     onClose={() => setShowScratchPad(false)}
                                 />
                                 {(() => {
-                                    const lang = i18n.language === 'zh' ? 'zh' : 'en'
+                                    const lang = effectiveLang
                                     const title = (lang === 'zh' ? diagnostic.lesson?.title_cn : diagnostic.lesson?.title_en) || diagnostic.lesson?.title
                                     const explanation = (lang === 'zh' ? diagnostic.lesson?.explanation_cn : diagnostic.lesson?.explanation_en) || diagnostic.lesson?.explanation
                                     return (
@@ -574,7 +615,7 @@ function App() {
                                         <div key={q.id} className="card" style={{ marginBottom: 12, position: 'relative' }}>
                                             {/* 语言切换按钮仅在主 hero-card 上显示 */}
                                             {(() => {
-                                                const lang = i18n.language === 'zh' ? 'zh' : 'en'
+                                                const lang = effectiveLang
                                                 const hasBilingualContent = !!(q && (q.content_cn || q.content_en))
                                                 const content = hasBilingualContent
                                                     ? (lang === 'zh' ? (q && q.content_cn) : (q && q.content_en)) || ''
@@ -587,7 +628,16 @@ function App() {
 
                                                 return (
                                                     <>
-                                                        <div><strong>{idx + 1}.</strong> {content}</div>
+                                                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                                                            <div style={{ flex: 1 }}><strong>{idx + 1}.</strong> {content}</div>
+                                                            <TtsSpeakButton
+                                                                lang={lang}
+                                                                text={String(content || '')}
+                                                                options={Array.isArray(options) ? options.map((x: any) => String(x)) : []}
+                                                                className="btn"
+                                                                title={lang === 'zh' ? '朗读题目和选项' : 'Read question and options'}
+                                                            />
+                                                        </div>
                                                         {q.type === 'mcq' && options && (
                                                             <div style={{ marginTop: 8 }}>
                                                                 {options.map((opt: any, i: number) => (
@@ -626,7 +676,7 @@ function App() {
                                 <div style={{ marginTop: 12, textAlign: 'center' }}>
                                     <button className="btn primary large" onClick={async () => {
                                         if (!token) return alert(t('please_login'))
-                                        const lang = i18n.language === 'zh' ? 'zh' : 'en'
+                                        const lang = effectiveLang
                                         const answers = (diagnostic.questions || []).map((q: any) => {
                                             if (!q) return { questionId: null, answer: '' }
                                             if (q.type === 'mcq' && typeof q._answerIndex === 'number') {
@@ -645,7 +695,7 @@ function App() {
                                                 token,
                                                 lessonId: diagnostic.lessonId,
                                                 answers,
-                                                lang: i18n.language,
+                                                lang: effectiveLang,
                                                 // for in-memory mode compatibility
                                                 lesson: { questions: diagnostic.questions }
                                             })
