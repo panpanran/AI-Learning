@@ -20,7 +20,10 @@ If a knowledge point involves shape recognition / geometry identification, do NO
 - 解析只写一句话，不要写详细步骤。
 
 如果该知识点涉及图形识别/几何图形辨认，请不要通过视觉图片出题，不要让学生“看图”。请通过文字描述图形的特征/性质来出题。例如：“四个角都是直角，且四条边都相等的图形是什么？”`,
-    user_en: `Generate a diagnostic test for this student. Inputs: {{student_profile}}. You MUST generate exactly {{num_questions}} questions (questions.length === {{num_questions}}). ALL questions must be objective multiple-choice (type: "mcq"), with exactly 4 options in each language (options.en.length === 4 AND options.zh.length === 4), and ONLY ONE correct answer. Use these retrieval_snippets for reference: {{retrieval_snippets}}.
+    user_en: `Generate a diagnostic test for this student. Inputs: {{student_profile}}.
+Grade/difficulty guidance (MUST follow): {{grade_guidance}}
+
+You MUST generate exactly {{num_questions}} questions (questions.length === {{num_questions}}). ALL questions must be objective multiple-choice (type: "mcq"), with exactly 4 options in each language (options.en.length === 4 AND options.zh.length === 4), and ONLY ONE correct answer. Use these retrieval_snippets for reference: {{retrieval_snippets}}.
 
 IMPORTANT (feature extraction / metadata):
 - For EACH question, include a "metadata" object used for deduplication and retrieval. Do NOT make it too generic.
@@ -41,7 +44,10 @@ You are also given a required knowledge point assignment plan for each question 
 The plan is an array of integers with length {{num_questions}}. For question i (0-based), you MUST set knowledge_point_id === knowledge_point_ids_plan[i].
 
     Return strict JSON with keys: {"lesson": {"title","explanation","images":[]}, "questions": [{"id","type":"mcq","content_cn":"string","content_en":"string","options":{"zh":["string","string","string","string"],"en":["string","string","string","string"]},"answer_cn":"string","answer_en":"string","explanation_cn":"string","explanation_en":"string","knowledge_point_id":123,"metadata":{...}}] }. All content, options, answers, and explanations must be provided in both Chinese and English. Do not return any text except valid JSON.`,
-    user_zh: `为学生生成诊断测试。输入：{{student_profile}}。你必须严格生成{{num_questions}}道题（questions.length === {{num_questions}}）。所有题目都必须是4选1的客观选择题（type: "mcq"，每种语言的 options.en.length === 4 且 options.zh.length === 4），且每题只有一个正确答案。可参考片段：{{retrieval_snippets}}。
+    user_zh: `为学生生成诊断测试。输入：{{student_profile}}。
+年级/难度要求（必须遵守）：{{grade_guidance}}
+
+你必须严格生成{{num_questions}}道题（questions.length === {{num_questions}}）。所有题目都必须是4选1的客观选择题（type: "mcq"，每种语言的 options.en.length === 4 且 options.zh.length === 4），且每题只有一个正确答案。可参考片段：{{retrieval_snippets}}。
 
 重要（特征抽取 / metadata）：
 - 每一道题必须包含一个 metadata 对象，用于去重和检索；不要写得太宽泛。

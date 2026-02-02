@@ -421,6 +421,9 @@ try {
     console.warn('Prompts module not found.');
 }
 
+const { parseGradeLevelLoose, getGradeGuidance } = require('./lib/gradeGuidance');
+const { registerDiagnosticRoutes } = require('./routes/diagnostic');
+
 // Postgres support (optional).
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL || process.env.PG_CONNECTION_STRING });
@@ -1777,6 +1780,9 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
             : 'Generate a diagnostic test as JSON.';
 
     const retrieval_snippets = [];
+    const gradeLevel = (student_profile && student_profile.grade_level != null) ? Number(student_profile.grade_level) : null;
+    const gradeCode = (student_profile && student_profile.grade_code != null) ? String(student_profile.grade_code) : null;
+    const subjectCode = (student_profile && student_profile.subject_code != null) ? String(student_profile.subject_code) : null;
     const userMessage = applyTemplateAll(userTpl, {
         student_profile: JSON.stringify(student_profile),
         num_questions: String(askN),
@@ -1784,6 +1790,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
         knowledge_points: JSON.stringify(knowledgePointsForPrompt),
         knowledge_point_ids_plan: JSON.stringify(knowledge_point_ids_plan),
         avoid_metadata: JSON.stringify(avoidMetadataObjects.slice(0, 5)),
+        grade_guidance: getGradeGuidance({ useLang, studentProfile: student_profile, gradeLevel, gradeCode, subjectCode }),
     });
 
     let completion;
@@ -2255,8 +2262,41 @@ app.post('/api/submit-answer', async (req, res) => {
     }
 });
 
-// Generate a 20-question diagnostic tailored to the student using RAG + OpenAI
-app.post('/api/generate/diagnostic', async (req, res) => {
+// Generate a diagnostic tailored to the student (extracted for readability)
+registerDiagnosticRoutes({
+    app,
+    deps: {
+        diagLog,
+        jwt,
+        JWT_SECRET,
+        users,
+        getUseDb: () => useDb,
+        pool,
+        resolveGradeSubject,
+        parseGradeLevelLoose,
+        getGradeGuidance,
+        getUserIdsByUsername,
+        getKnowledgePointScoresFromHistory,
+        dbFirstSelectAndMaybeGenerateWithGpt,
+        getPineconeQuestionDedupeConfig,
+        getSimilarityThreshold,
+        coerceEmbeddingArray,
+        embedTextsOpenAI,
+        buildMetadataEmbeddingText,
+        buildQuestionDedupeEmbeddingText,
+        cosineSimilarity,
+        getPinecone,
+        prompts,
+        applyTemplateAll,
+        getOpenAI,
+        createChatCompletionJson,
+        safeParseJsonObject,
+        validateDiagnostic,
+    }
+});
+
+// Legacy inline handler (kept temporarily; not used by frontend)
+app.post('/api/generate/diagnostic__legacy', async (req, res) => {
     const { token, grade, subject, grade_id, subject_id, lang } = req.body;
     diagLog('[diagnostic] payload:', { ...req.body, token: token ? '<redacted>' : null });
     if (!token) {
