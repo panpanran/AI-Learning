@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-// ...existing code...
 import API from './api'
+import GenerationProgressBar from './GenerationProgressBar'
+import { beginGenerationProgress, type GenerationProgressState } from './generationProgress'
 
 type ScoreRow = {
     grade_id: number | null
@@ -145,6 +146,7 @@ function ScoresRoute() {
 
     const [loading, setLoading] = useState(false)
     const [generatingKey, setGeneratingKey] = useState<string | null>(null)
+    const [generationProgress, setGenerationProgress] = useState<GenerationProgressState | null>(null)
     const [items, setItems] = useState<ScoreRow[]>([])
     const [openGrades, setOpenGrades] = useState<Record<string, boolean>>({})
     const [openSubjects, setOpenSubjects] = useState<Record<string, boolean>>({})
@@ -281,6 +283,8 @@ function ScoresRoute() {
                     <div className="meta" style={{ marginTop: 6 }}>{t('kp_scores_note')}</div>
                 </div>
 
+                {generatingKey ? <GenerationProgressBar progress={generationProgress} /> : null}
+
                 {loading ? (
                     <div style={{ textAlign: 'center', margin: '24px 0' }}>
                         <div className="loader" />
@@ -327,7 +331,14 @@ function ScoresRoute() {
                                                                     if (!token) return
                                                                     if (!Number.isInteger(Number(r.grade_id)) || !Number.isInteger(Number(r.subject_id)) || !Number.isInteger(Number(r.knowledge_point_id))) return
                                                                     setGeneratingKey(rowKey)
+                                                                    setGenerationProgress({ stage: 'queued', percent: 2 })
+                                                                    let progressHandle: Awaited<ReturnType<typeof beginGenerationProgress>> | null = null
                                                                     try {
+                                                                        try {
+                                                                            progressHandle = await beginGenerationProgress(token, 'practice', setGenerationProgress)
+                                                                        } catch {
+                                                                            // Progress is optional for compatibility with older backends.
+                                                                        }
                                                                         const resp = await API.post('/api/generate/practice', {
                                                                             token,
                                                                             grade_id: Number(r.grade_id),
@@ -335,6 +346,7 @@ function ScoresRoute() {
                                                                             knowledge_point_id: Number(r.knowledge_point_id),
                                                                             num_questions: PRACTICE_NUM_QUESTIONS,
                                                                             lang: i18n.language,
+                                                                            progress_id: progressHandle?.id,
                                                                         })
                                                                         const diagnostic = {
                                                                             lessonId: null,
@@ -351,8 +363,9 @@ function ScoresRoute() {
                                                                             }
                                                                         })
                                                                     } catch (e) {
-                                                                        // keep quiet; user can retry
+                                                                        setGenerationProgress({ stage: 'failed', percent: 100 })
                                                                     } finally {
+                                                                        progressHandle?.stop()
                                                                         setGeneratingKey(null)
                                                                     }
                                                                 }}

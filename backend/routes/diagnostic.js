@@ -1,6 +1,66 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
+const fsPath = require('path');
+const { buildRagasSamples } = require('../lib/ragasSamples');
+const { queueRagasAudit } = require('../lib/ragasAuditor');
+const { queueDiagnosticLangWatchEvaluations } = require('../lib/langwatchReporter');
+const { loadFeedbackContextForPrompt } = require('../lib/feedbackStore');
+const { buildKnowledgePointIdsPlan } = require('../lib/knowledgePointPlanner');
+const { isAgentsDiagnosticRunEnabled, runAgentsDiagnosticRun } = require('../lib/agentClient');
+
+/**
+ * Append Ragas-compatible evaluation records to ragas/buffer.jsonl (non-blocking).
+ * Called after the dedupe loop so questionsOut, knowledgePointsForPrompt and
+ * useLang are all finalised.
+ *
+ * Each record:
+ *   question     – question text in the active language
+ *   answer       – correct answer
+ *   contexts     – knowledge-point description used as RAG context for GPT
+ *   ground_truth – explanation (best available ground truth)
+ */
+function logRagasSamples(questions, kpList, lang) {
+    if (!Array.isArray(questions) || !questions.length) return;
+    try {
+        const bufferPath = fsPath.resolve(__dirname, '..', '..', 'ragas', 'buffer.jsonl');
+        const lines = buildRagasSamples(questions, kpList, lang).map((row) => JSON.stringify(row));
+        fs.appendFile(bufferPath, lines.join('\n') + '\n', (err) => {
+            if (err) {
+                console.error('[ragas] failed to append buffer.jsonl:', err.message || err);
+                return;
+            }
+            console.log('[ragas] appended samples:', { count: lines.length, file: bufferPath });
+        });
+    } catch {
+        // non-blocking — never let logging errors surface to the caller
+    }
+}
+
+function reportDiagnosticQuality(questions, kpList, lang, meta, dbPool) {
+    logRagasSamples(questions, kpList, lang);
+
+    const auditMeta = {
+        userId: meta && meta.userId,
+        gradeId: meta && meta.gradeId,
+        subjectId: meta && meta.subjectId,
+        knowledgePointIdsPlan: meta && meta.knowledgePointIdsPlan,
+        pool: dbPool || null,
+    };
+
+    // Layer A rules + answer_relevancy (Python) — async, uses OPENAI_API_KEY for LLM metric
+    queueRagasAudit({ questions, kpList, lang, meta: auditMeta });
+
+    // Optional LangWatch dashboard (response_relevancy + rule summary)
+    queueDiagnosticLangWatchEvaluations({
+        questions,
+        kpList,
+        lang,
+        knowledgePointIdsPlan: auditMeta.knowledgePointIdsPlan,
+        ...auditMeta,
+    });
+}
 
 function registerDiagnosticRoutes({ app, deps }) {
     if (!app) throw new Error('registerDiagnosticRoutes: app is required');
@@ -33,11 +93,17 @@ function registerDiagnosticRoutes({ app, deps }) {
         createChatCompletionJson,
         safeParseJsonObject,
         validateDiagnostic,
+        updateGenerationProgress,
     } = deps;
 
     // Generate a diagnostic tailored to the student.
     app.post('/api/generate/diagnostic', async (req, res) => {
-        const { token, grade, subject, grade_id, subject_id, lang } = req.body;
+        const { token, grade, subject, grade_id, subject_id, lang, progress_id } = req.body;
+        let progressUserId = null;
+        const setProgress = (stage, percent, message, error = null) => {
+            if (typeof updateGenerationProgress !== 'function' || progressUserId == null) return;
+            updateGenerationProgress(progress_id, progressUserId, { stage, percent, message, error });
+        };
         diagLog('[diagnostic] payload:', { ...req.body, token: token ? '<redacted>' : null });
         if (!token) {
             diagLog('[diagnostic] missing token');
@@ -51,6 +117,8 @@ function registerDiagnosticRoutes({ app, deps }) {
             let data;
             try {
                 data = jwt.verify(token, JWT_SECRET);
+                progressUserId = data.id;
+                setProgress('planning', 10, 'Loading your learning profile');
                 diagLog('[diagnostic] token valid, user:', data);
             } catch (e) {
                 diagLog('[diagnostic] invalid token:', e && e.message ? e.message : e);
@@ -181,72 +249,6 @@ function registerDiagnosticRoutes({ app, deps }) {
                 }
             }
 
-            const buildKnowledgePointIdsPlan = async (knowledgePoints, desiredCount) => {
-                const rawIds = (Array.isArray(knowledgePoints) ? knowledgePoints : [])
-                    .map(k => (k && k.id != null ? Number(k.id) : null))
-                    .filter(x => Number.isInteger(x));
-                const ids = Array.from(new Set(rawIds));
-                const n = ids.length;
-                const m = Math.max(0, Number(desiredCount) || 0);
-                if (!n || !m) return [];
-
-                let ordered = ids.slice();
-
-                if (useDb && useGradeId && useSubjectId) {
-                    try {
-                        const r = await pool.query(
-                            `SELECT q.knowledge_point_id, COUNT(*)::int AS cnt
-                             FROM history h
-                             JOIN questions q ON q.id = h.question_id
-                             WHERE h.user_id = ANY($1::int[])
-                               AND q.grade_id = $2
-                               AND q.subject_id = $3
-                               AND q.knowledge_point_id = ANY($4::int[])
-                             GROUP BY q.knowledge_point_id`,
-                            [studentUserIds, useGradeId, useSubjectId, ids]
-                        );
-                        const cntMap = new Map();
-                        for (const row of (r.rows || [])) {
-                            const kid = row && row.knowledge_point_id != null ? Number(row.knowledge_point_id) : null;
-                            const cnt = row && row.cnt != null ? Number(row.cnt) : 0;
-                            if (Number.isInteger(kid)) cntMap.set(kid, cnt);
-                        }
-
-                        ordered.sort((a, b) => {
-                            const ca = cntMap.get(a) || 0;
-                            const cb = cntMap.get(b) || 0;
-                            if (ca !== cb) return ca - cb;
-                            return crypto.randomInt(0, 2) === 0 ? -1 : 1;
-                        });
-                    } catch {
-                        ordered = ids.slice();
-                        for (let i = ordered.length - 1; i > 0; i--) {
-                            const j = crypto.randomInt(0, i + 1);
-                            const tmp = ordered[i];
-                            ordered[i] = ordered[j];
-                            ordered[j] = tmp;
-                        }
-                    }
-                } else {
-                    for (let i = ordered.length - 1; i > 0; i--) {
-                        const j = crypto.randomInt(0, i + 1);
-                        const tmp = ordered[i];
-                        ordered[i] = ordered[j];
-                        ordered[j] = tmp;
-                    }
-                }
-
-                if (m <= n) return ordered.slice(0, m);
-
-                const plan = ordered.slice();
-                const poolSize = Math.min(ordered.length, Math.max(3, Math.ceil(ordered.length / 3)));
-                const repeatPool = ordered.slice(0, poolSize);
-                while (plan.length < m) {
-                    plan.push(repeatPool[crypto.randomInt(0, repeatPool.length)]);
-                }
-                return plan;
-            };
-
             let knowledgePointsForPrompt = [];
             let allowedKnowledgePointIds = new Set();
             if (useDb) {
@@ -290,7 +292,18 @@ function registerDiagnosticRoutes({ app, deps }) {
                 allowedKnowledgePointIds = new Set(knowledgePointsForPrompt.map(k => k.id));
             }
 
-            const knowledgePointIdsPlanForNumQuestions = await buildKnowledgePointIdsPlan(knowledgePointsForPrompt, numQuestions);
+            const buildPlan = (knowledgePoints, desiredCount) => buildKnowledgePointIdsPlan({
+                pool,
+                knowledgePoints,
+                desiredCount,
+                studentUserIds,
+                gradeId: useGradeId,
+                subjectId: useSubjectId,
+                useDb,
+            });
+
+            const knowledgePointIdsPlanForNumQuestions = await buildPlan(knowledgePointsForPrompt, numQuestions);
+            setProgress('planning', 16, 'Planning knowledge point coverage');
 
             diagLog('[diagnostic] branch selection, useDb:', useDb);
             if (!useDb) {
@@ -306,6 +319,62 @@ function registerDiagnosticRoutes({ app, deps }) {
                     subject_code: subjectCode,
                     grade_subject_notes: gradeSubjectNotes,
                 };
+
+                const gradeGuidance = getGradeGuidance({ useLang, studentProfile: student_profile, gradeLevel, gradeCode, subjectCode });
+                const feedbackContext = await loadFeedbackContextForPrompt(pool, {
+                    gradeId: useGradeId,
+                    subjectId: useSubjectId,
+                    knowledgePointIds: knowledgePointIdsPlanForNumQuestions,
+                    lang: useLang,
+                });
+
+                if (isAgentsDiagnosticRunEnabled()) {
+                    try {
+                        setProgress('generating', 40, 'AI agents are generating questions');
+                        const agentsResult = await runAgentsDiagnosticRun({
+                            numQuestions,
+                            kpList: knowledgePointsForPrompt,
+                            lang: useLang,
+                            studentProfile: student_profile,
+                            studentUserIds,
+                            gradeId: useGradeId,
+                            subjectId: useSubjectId,
+                            gradeGuidance,
+                            feedbackContext,
+                            avoidMetadata: [],
+                            persist: false,
+                        });
+                        if (agentsResult && Array.isArray(agentsResult.questions) && agentsResult.questions.length) {
+                            const genQuestions = agentsResult.questions;
+                            setProgress('evaluating', 94, 'Scheduling quality evaluation');
+                            reportDiagnosticQuality(genQuestions, knowledgePointsForPrompt, useLang, {
+                                userId: user.id,
+                                gradeId: useGradeId,
+                                subjectId: useSubjectId,
+                                knowledgePointIdsPlan: agentsResult.knowledge_point_ids_plan || knowledgePointIdsPlanForNumQuestions,
+                                gradeGuidance,
+                            }, pool);
+                            const lessonFromAgents = agentsResult.lesson || {};
+                            setProgress('completed', 100, 'Questions are ready');
+                            return res.json({
+                                generated: true,
+                                source: 'agents-service',
+                                lesson: {
+                                    title: useLang === 'zh' ? lessonBilingual.title_cn : lessonBilingual.title_en,
+                                    explanation: useLang === 'zh' ? lessonBilingual.explanation_cn : lessonBilingual.explanation_en,
+                                    title_cn: lessonBilingual.title_cn,
+                                    title_en: lessonBilingual.title_en,
+                                    explanation_cn: lessonBilingual.explanation_cn,
+                                    explanation_en: lessonBilingual.explanation_en,
+                                    images: lessonFromAgents.images || [],
+                                },
+                                questions: genQuestions,
+                            });
+                        }
+                    } catch (e) {
+                        diagLog('[diagnostic] agents run failed, falling back to Express GPT:', e && e.message ? e.message : e);
+                    }
+                }
 
                 const sysTpl = (useLang === 'zh' && prompts && prompts.diagnostic.system_zh)
                     ? prompts.diagnostic.system_zh
@@ -326,7 +395,8 @@ function registerDiagnosticRoutes({ app, deps }) {
                     knowledge_points: JSON.stringify(knowledgePointsForPrompt),
                     knowledge_point_ids_plan: JSON.stringify(knowledgePointIdsPlanForNumQuestions),
                     avoid_metadata: JSON.stringify([]),
-                    grade_guidance: getGradeGuidance({ useLang, studentProfile: student_profile, gradeLevel, gradeCode, subjectCode }),
+                    grade_guidance: gradeGuidance,
+                    feedback_context: feedbackContext,
                 });
 
                 const aiClient = getOpenAI();
@@ -340,6 +410,7 @@ function registerDiagnosticRoutes({ app, deps }) {
 
                 let completion;
                 try {
+                    setProgress('generating', 42, 'AI is generating questions');
                     completion = await createChatCompletionJson(aiClient, {
                         model,
                         messages: [
@@ -361,6 +432,7 @@ function registerDiagnosticRoutes({ app, deps }) {
                     diagLog('[diagnostic] failed to parse generated JSON');
                     return res.status(500).json({ error: 'Failed to parse generated JSON' });
                 }
+                setProgress('validating', 72, 'Validating generated questions');
 
                 if (gen && Array.isArray(gen.questions)) {
                     gen.questions.forEach(q => {
@@ -391,6 +463,14 @@ function registerDiagnosticRoutes({ app, deps }) {
                 }
 
                 diagLog('[diagnostic] returning in-memory diagnostic result');
+                setProgress('evaluating', 94, 'Scheduling quality evaluation');
+                reportDiagnosticQuality(gen.questions, knowledgePointsForPrompt, useLang, {
+                    userId: user.id,
+                    gradeId: useGradeId,
+                    subjectId: useSubjectId,
+                    knowledgePointIdsPlan: knowledgePointIdsPlanForNumQuestions,
+                }, pool);
+                setProgress('completed', 100, 'Questions are ready');
                 return res.json({
                     generated: true,
                     lesson: {
@@ -486,10 +566,11 @@ function registerDiagnosticRoutes({ app, deps }) {
                     },
                     knowledgePointsForPrompt,
                     allowedKnowledgePointIds,
-                    buildKnowledgePointIdsPlan,
+                    buildKnowledgePointIdsPlan: buildPlan,
                     max_tokens: 5000,
                 },
                 logFn: diagLog,
+                onProgress: ({ stage, percent, message }) => setProgress(stage, percent, message),
             });
 
             if (genRes && genRes.error) {
@@ -611,10 +692,11 @@ function registerDiagnosticRoutes({ app, deps }) {
                                 },
                                 knowledgePointsForPrompt,
                                 allowedKnowledgePointIds,
-                                buildKnowledgePointIdsPlan,
+                                buildKnowledgePointIdsPlan: buildPlan,
                                 max_tokens: 5000,
                             },
                             logFn: diagLog,
+                            onProgress: ({ stage, percent, message }) => setProgress(stage, percent, message),
                         });
                         const newAccepted = (regenRes && regenRes.generatedQuestions) ? regenRes.generatedQuestions : [];
                         if (Array.isArray(newAccepted) && newAccepted.length) {
@@ -628,6 +710,7 @@ function registerDiagnosticRoutes({ app, deps }) {
                 };
 
                 while (questionsOut.length < numQuestions && attempt < maxFillAttempts) {
+                    setProgress('persisting', 82 + Math.min(10, attempt * 3), 'Saving unique questions');
                     const relaxStep = attempt;
                     const enableMetadataDedupe = enableMetadataDedupeBase && relaxStep < 2;
                     const enableSemanticDedupeThisAttempt = enableSemanticDedupe && relaxStep < 1;
@@ -828,6 +911,14 @@ function registerDiagnosticRoutes({ app, deps }) {
                 const lessonTitle = useLang === 'zh' ? lessonBilingual.title_cn : lessonBilingual.title_en;
                 const lessonExplanation = useLang === 'zh' ? lessonBilingual.explanation_cn : lessonBilingual.explanation_en;
 
+                setProgress('evaluating', 96, 'Scheduling quality evaluation');
+                reportDiagnosticQuality(questionsOut, knowledgePointsForPrompt, useLang, {
+                    userId: user.id,
+                    gradeId: useGradeId,
+                    subjectId: useSubjectId,
+                    knowledgePointIdsPlan: knowledgePointIdsPlanForNumQuestions,
+                }, pool);
+                setProgress('completed', 100, 'Questions are ready');
                 return res.json({
                     generated: true,
                     lesson: {
@@ -869,6 +960,14 @@ function registerDiagnosticRoutes({ app, deps }) {
                 images: []
             };
 
+            setProgress('evaluating', 96, 'Scheduling quality evaluation');
+            reportDiagnosticQuality(questionsOut, knowledgePointsForPrompt, useLang, {
+                userId: user.id,
+                gradeId: useGradeId,
+                subjectId: useSubjectId,
+                knowledgePointIdsPlan: knowledgePointIdsPlanForNumQuestions,
+            }, pool);
+            setProgress('completed', 100, 'Questions are ready');
             return res.json({
                 generated: true,
                 lesson,
@@ -892,9 +991,10 @@ function registerDiagnosticRoutes({ app, deps }) {
             });
 
         } catch (e) {
+            setProgress('failed', 100, 'Question generation failed', e && e.message ? e.message : String(e));
             return res.status(401).json({ error: 'Invalid token' });
         }
     });
 }
 
-module.exports = { registerDiagnosticRoutes };
+module.exports = { registerDiagnosticRoutes, reportDiagnosticQuality };

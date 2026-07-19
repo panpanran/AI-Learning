@@ -39,6 +39,11 @@ IMPORTANT (feature extraction / metadata):
 - Avoid generating questions that are similar to these frequent metadata patterns for this student: {{avoid_metadata}}.
 - If the same story template repeats, vary the numbers; avoid repeatedly using the same type/nums/result.
 
+Past diagnostic quality feedback (learn from this; do NOT copy questions verbatim): {{feedback_context}}
+- few_shot_good: high-scoring example questions for similar knowledge points
+- avoid_patterns: known failure patterns to avoid
+- prompt_patches: extra authoring rules from prior reviews
+
 Knowledge points are pre-seeded (do NOT invent new ones): {{knowledge_points}}.
 You are also given a required knowledge point assignment plan for each question index: {{knowledge_point_ids_plan}}.
 The plan is an array of integers with length {{num_questions}}. For question i (0-based), you MUST set knowledge_point_id === knowledge_point_ids_plan[i].
@@ -62,6 +67,11 @@ The plan is an array of integers with length {{num_questions}}. For question i (
         {"type":"vocabulary","word":"apple","context":"fruit"}
 - 需要避开与该学生“高频出现的 metadata 模式”相似的题目：{{avoid_metadata}}。
 - 如果题型/情境很相似，请主动换数字，避免总是同一个 type/nums/结果。
+
+历史诊断质量反馈（用于改进出题；不要照抄原题）：{{feedback_context}}
+- few_shot_good：同知识点的高分例题
+- avoid_patterns：已知失败模式，需避免
+- prompt_patches：来自历史评审的额外出题规则
 
 知识点是预先存入数据库的输入列表（不要自造新的知识点）：{{knowledge_points}}。
 同时你会拿到一个“每道题对应知识点”的分配计划：{{knowledge_point_ids_plan}}。

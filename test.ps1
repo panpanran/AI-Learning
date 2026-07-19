@@ -37,3 +37,21 @@ Invoke-RestMethod -Uri 'https://ai-learning-backend-vm34.onrender.com/api/pineco
     -Headers @{ Authorization = "Bearer $token" } `
     -ContentType 'application/json' `
     -Body $body | ConvertTo-Json -Depth 8
+
+
+# Load OPENAI_API_KEY from ../.env.local if not already set (never hardcode keys here).
+if (-not $env:OPENAI_API_KEY) {
+    $envFile = Join-Path (Split-Path $PSScriptRoot -Parent) '.env.local'
+    if (-not (Test-Path $envFile)) { $envFile = Join-Path $PSScriptRoot '..\.env.local' }
+    if (Test-Path $envFile) {
+        Get-Content $envFile | ForEach-Object {
+            if ($_ -match '^\s*OPENAI_API_KEY=(.+)$') {
+                $env:OPENAI_API_KEY = $Matches[1].Trim().Trim('"').Trim("'")
+            }
+        }
+    }
+}
+if (-not $env:OPENAI_API_KEY) {
+    throw 'OPENAI_API_KEY not set. Put it in ../.env.local or set the env var before running.'
+}
+python .\ragas\evaluate_ragas.py --input .\ragas\buffer.jsonl --output .\ragas\ragas_result.json

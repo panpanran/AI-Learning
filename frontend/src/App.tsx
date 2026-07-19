@@ -7,6 +7,8 @@ import { useTranslation } from 'react-i18next'
 import API from './api'
 import MenuBar from './MenuBar'
 import HistoryPage from './HistoryPage'
+import GenerationProgressBar from './GenerationProgressBar'
+import { beginGenerationProgress, type GenerationProgressState } from './generationProgress'
 import './index.css'
 
 function feDiagLog(...args: any[]) {
@@ -154,6 +156,7 @@ function App() {
     const [history, setHistory] = useState([] as any[])
     const [hasSelected, setHasSelected] = useState(false)
     const [loadingDiagnostic, setLoadingDiagnostic] = useState(false)
+    const [generationProgress, setGenerationProgress] = useState<GenerationProgressState | null>(null)
     const [loadingHistory, setLoadingHistory] = useState(false)
     const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
 
@@ -263,10 +266,24 @@ function App() {
             }
 
             setLoadingDiagnostic(true);
+            setGenerationProgress({ stage: 'queued', percent: 2 });
             (async () => {
+                let progressHandle: Awaited<ReturnType<typeof beginGenerationProgress>> | null = null
                 try {
                     // 这里可根据 history 推荐错题/知识点，否则生成诊断题
-                    const payload = { token, numQuestions: 20, grade_id: parsedGradeId, subject_id: parsedSubjectId, lang: lockedLangForSubject || i18n.language }
+                    try {
+                        progressHandle = await beginGenerationProgress(token, 'diagnostic', setGenerationProgress)
+                    } catch {
+                        // Progress reporting is optional; generation still works with older backends.
+                    }
+                    const payload = {
+                        token,
+                        numQuestions: 20,
+                        grade_id: parsedGradeId,
+                        subject_id: parsedSubjectId,
+                        lang: lockedLangForSubject || i18n.language,
+                        progress_id: progressHandle?.id,
+                    }
                     feDiagLog('[fe][diagnostic] request /api/generate/diagnostic', {
                         hasSelected,
                         loadingDiagnostic,
@@ -310,6 +327,9 @@ function App() {
                         localStorage.clear();
                         // 不自动跳转，用户可手动点击退出或登录
                     }
+                    setGenerationProgress({ stage: 'failed', percent: 100 })
+                } finally {
+                    progressHandle?.stop()
                 }
                 setLoadingDiagnostic(false)
             })();
@@ -564,8 +584,7 @@ function App() {
                         </div>
                         {loadingDiagnostic ? (
                             <div style={{ textAlign: 'center', margin: '32px 0' }}>
-                                <div className="loader" />
-                                <div style={{ marginTop: 12, color: 'var(--muted)' }}>{t('ai_generating')}</div>
+                                <GenerationProgressBar progress={generationProgress} />
                             </div>
                         ) : diagnostic ? (
                             <>

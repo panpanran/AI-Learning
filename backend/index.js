@@ -109,6 +109,36 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
+const {
+    createGenerationProgress,
+    updateGenerationProgress,
+    getGenerationProgress,
+} = require('./lib/generationProgress');
+
+app.post('/api/generation-progress', (req, res) => {
+    const { token, kind } = req.body || {};
+    if (!token) return res.status(400).json({ error: 'Token required' });
+    try {
+        const data = jwt.verify(token, JWT_SECRET);
+        return res.status(201).json(createGenerationProgress({ userId: data.id, kind }));
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+});
+
+app.get('/api/generation-progress/:id', (req, res) => {
+    const auth = String(req.headers.authorization || '');
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const data = jwt.verify(token, JWT_SECRET);
+        const job = getGenerationProgress(req.params.id, data.id);
+        if (!job) return res.status(404).json({ error: 'Progress job not found' });
+        return res.json(job);
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+});
 
 let openai = null;
 if (process.env.OPENAI_API_KEY) {
@@ -422,7 +452,8 @@ try {
 }
 
 const { parseGradeLevelLoose, getGradeGuidance } = require('./lib/gradeGuidance');
-const { registerDiagnosticRoutes } = require('./routes/diagnostic');
+const { loadFeedbackContextForPrompt, isFeedbackStoreEnabled } = require('./lib/feedbackStore');
+const { registerDiagnosticRoutes, reportDiagnosticQuality } = require('./routes/diagnostic');
 
 // Postgres support (optional).
 const { Pool } = require('pg');
@@ -757,6 +788,47 @@ async function ensureTables() {
             score REAL DEFAULT 0,
             last_updated BIGINT
         )`);
+
+        await pool.query(`CREATE TABLE IF NOT EXISTS diagnostic_runs (
+            id UUID PRIMARY KEY,
+            user_id INTEGER,
+            grade_id INTEGER,
+            subject_id INTEGER,
+            lang TEXT,
+            batch_scores JSONB,
+            status TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS question_feedback (
+            id SERIAL PRIMARY KEY,
+            run_id UUID REFERENCES diagnostic_runs(id) ON DELETE CASCADE,
+            knowledge_point_id INTEGER,
+            question_snapshot JSONB,
+            scores JSONB,
+            judge_reasons JSONB,
+            critique JSONB,
+            label TEXT,
+            used_in_prompt_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS prompt_patches (
+            id SERIAL PRIMARY KEY,
+            scope TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            patch_text TEXT NOT NULL,
+            source_run_id UUID,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )`);
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS question_feedback_kp_label_idx ON question_feedback(knowledge_point_id, label, created_at DESC)');
+        } catch (e) { }
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS question_feedback_run_idx ON question_feedback(run_id)');
+        } catch (e) { }
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS prompt_patches_scope_idx ON prompt_patches(scope, scope_id, active, created_at DESC)');
+        } catch (e) { }
 
         // --- Knowledge points schema migration (legacy text id -> integer id; name -> name_cn/name_en) ---
         // Old versions used knowledge_points.id as TEXT and questions/student_knowledge_scores.knowledge_point_id as TEXT.
@@ -1564,8 +1636,14 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     dedupeCfgOverride = null,
     promptCtx,
     logFn = null,
+    onProgress = null,
 }) {
     const log = typeof logFn === 'function' ? logFn : (() => { });
+    const progress = (stage, percent, message) => {
+        try {
+            if (typeof onProgress === 'function') onProgress({ stage, percent, message });
+        } catch { }
+    };
     const logImportant = (...args) => {
         try { console.log(...args); } catch { }
         try { if (typeof logFn === 'function') logFn(...args); } catch { }
@@ -1664,6 +1742,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     };
 
     // 1) fetch unused questions from DB
+    progress('searching_db', 18, 'Checking the question bank');
     const selected = [];
     try {
         // Over-fetch to avoid false GPT fallback when DB has enough rows but
@@ -1706,6 +1785,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
 
     let questionsOut = uniqueByContentOptionsHash(selected).slice(0, n);
     if (questionsOut.length >= n) {
+        progress('preparing', 88, 'Preparing selected questions');
         return { questionsOut, generatedQuestions: [], generatedLesson: null };
     }
 
@@ -1717,6 +1797,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     } catch { }
 
     // 2) If still not enough, ask GPT for (missing + 5)
+    progress('planning', 28, 'Planning new questions');
     const missing = n - questionsOut.length;
     let askN = missing + 5;
 
@@ -1791,10 +1872,17 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
         knowledge_point_ids_plan: JSON.stringify(knowledge_point_ids_plan),
         avoid_metadata: JSON.stringify(avoidMetadataObjects.slice(0, 5)),
         grade_guidance: getGradeGuidance({ useLang, studentProfile: student_profile, gradeLevel, gradeCode, subjectCode }),
+        feedback_context: await loadFeedbackContextForPrompt(pool, {
+            gradeId,
+            subjectId,
+            knowledgePointIds: knowledge_point_ids_plan,
+            lang: useLang,
+        }),
     });
 
     let completion;
     try {
+        progress('generating', 42, 'AI is generating questions');
         completion = await createChatCompletionJson(aiClient, {
             model,
             messages: [
@@ -1814,6 +1902,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     if (!gen || !Array.isArray(gen.questions)) {
         return { error: { status: 500, body: { error: 'Failed to parse generated JSON' } } };
     }
+    progress('validating', 62, 'Validating generated questions');
 
     // Map bilingual fields and options
     const existingHashes = new Set(questionsOut.map(q => q.content_options_hash).filter(Boolean));
@@ -1943,6 +2032,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     }
 
     // Per-student filtering derived from Postgres history (userIds), compared via Pinecone using ONLY global question_metadata vectors.
+    progress('deduplicating', 72, 'Checking for similar questions');
     let acceptedForInsert = accepted;
     try {
         const pcForDedupe = (() => {
@@ -2292,6 +2382,7 @@ registerDiagnosticRoutes({
         createChatCompletionJson,
         safeParseJsonObject,
         validateDiagnostic,
+        updateGenerationProgress,
     }
 });
 
@@ -2570,7 +2661,13 @@ app.post('/api/generate/diagnostic__legacy', async (req, res) => {
                 retrieval_snippets: JSON.stringify([]),
                 knowledge_points: JSON.stringify(knowledgePointsForPrompt),
                 knowledge_point_ids_plan: JSON.stringify(knowledgePointIdsPlanForNumQuestions),
-                avoid_metadata: JSON.stringify([])
+                avoid_metadata: JSON.stringify([]),
+                feedback_context: await loadFeedbackContextForPrompt(pool, {
+                    gradeId: useGradeId,
+                    subjectId: useSubjectId,
+                    knowledgePointIds: knowledgePointIdsPlanForNumQuestions,
+                    lang: useLang,
+                }),
             });
 
             const aiClient = getOpenAI();
@@ -3143,7 +3240,7 @@ app.post('/api/generate/diagnostic__legacy', async (req, res) => {
 
 // Generate practice questions for a specific knowledge point (DB -> Pinecone RAG -> GPT fill)
 app.post('/api/generate/practice', async (req, res) => {
-    const { token, grade_id, subject_id, knowledge_point_id, num_questions, lang } = req.body || {};
+    const { token, grade_id, subject_id, knowledge_point_id, num_questions, lang, progress_id } = req.body || {};
     if (!token) return res.status(400).json({ error: 'Token required' });
     if (!useDb) return res.status(400).json({ error: 'DB disabled' });
 
@@ -3163,6 +3260,10 @@ app.post('/api/generate/practice', async (req, res) => {
     } catch (e) {
         return res.status(401).json({ error: 'Invalid token' });
     }
+    const setProgress = (stage, percent, message) => {
+        updateGenerationProgress(progress_id, data.id, { stage, percent, message });
+    };
+    setProgress('planning', 10, 'Loading the selected knowledge point');
 
     // Load user
     let user = null;
@@ -3259,8 +3360,15 @@ app.post('/api/generate/practice', async (req, res) => {
             max_tokens: 4000,
         },
         logFn: (...args) => { try { console.log('[practice]', ...args); } catch { } },
+        onProgress: ({ stage, percent, message }) => setProgress(stage, percent, message),
     });
     if (genRes && genRes.error) {
+        updateGenerationProgress(progress_id, data.id, {
+            stage: 'failed',
+            percent: 100,
+            message: 'Question generation failed',
+            error: genRes.error.body && genRes.error.body.error,
+        });
         return res.status(genRes.error.status).json(genRes.error.body);
     }
 
@@ -3268,6 +3376,7 @@ app.post('/api/generate/practice', async (req, res) => {
     const acceptedForInsert = (genRes && genRes.generatedQuestions) ? genRes.generatedQuestions : [];
 
     if (questionsOut.length < n) {
+        setProgress('persisting', 82, 'Saving unique questions');
         const practiceLog = (...args) => { try { console.log('[practice]', ...args); } catch { } };
 
         // Optional metadata-based dedupe via Pinecone cosine similarity.
@@ -3422,6 +3531,15 @@ app.post('/api/generate/practice', async (req, res) => {
         explanation_cn: '针对当前知识点进行专项练习。',
         explanation_en: 'Targeted practice for this knowledge point.'
     };
+
+    setProgress('evaluating', 96, 'Scheduling quality evaluation');
+    reportDiagnosticQuality(questionsOut, [kpObj], useLang, {
+        userId: user.id,
+        gradeId: useGradeId,
+        subjectId: useSubjectId,
+        knowledgePointIdsPlan: Array.from({ length: questionsOut.length }, () => kpId),
+    }, pool);
+    setProgress('completed', 100, 'Questions are ready');
 
     return res.json({
         generated: true,
@@ -3832,10 +3950,35 @@ app.get('/api/history', async (req, res) => {
     }
 });
 
+const { ensureLangWatchInit, isLangWatchEnabled } = require('./lib/langwatchReporter');
+const { isRagasAuditEnabled } = require('./lib/ragasAuditor');
+
 if (require.main === module) {
-    app.listen(PORT, () => {
-        console.log(`AI Learning backend listening on http://localhost:${PORT}`);
-    });
+    const startServer = () => {
+        app.listen(PORT, () => {
+            console.log(`AI Learning backend listening on http://localhost:${PORT}`);
+            if (isRagasAuditEnabled()) {
+                console.log('[ragas] audit enabled — each diagnostic batch async-reviewed (see ragas/audit_log.jsonl)');
+            }
+            if (isFeedbackStoreEnabled()) {
+                console.log('[feedback] store enabled — audit results persist to DB and feed next diagnostic prompt');
+            }
+            if (isLangWatchEnabled()) {
+                console.log('[langwatch] enabled — scores also sent to LangWatch dashboard');
+            }
+        });
+    };
+
+    if (isLangWatchEnabled()) {
+        ensureLangWatchInit()
+            .then(startServer)
+            .catch((err) => {
+                console.error('[langwatch] init failed (starting server anyway):', err && err.message ? err.message : err);
+                startServer();
+            });
+    } else {
+        startServer();
+    }
 } else {
     module.exports = app;
 }

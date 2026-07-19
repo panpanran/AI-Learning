@@ -1,0 +1,98 @@
+# Local / server debugging for Max AI Learning
+#
+# Default (uses DATABASE_URL from ../.env.local, e.g. Neon):
+#   docker compose up --build
+#
+# With local Postgres instead of cloud DB:
+#   docker compose --profile local-db up --build
+#   (set DATABASE_URL=postgresql://dev:devpwd@postgres:5432/ai_learning in ../.env.local)
+#
+# Production-style static frontend:
+#   docker compose --profile prod up --build
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: maxai-postgres
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: devpwd
+      POSTGRES_DB: ai_learning
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d ai_learning"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: maxai-backend
+    ports:
+      - "4000:4000"
+    env_file:
+      - path: ../.env.local
+        required: false
+    environment:
+      PORT: 4000
+    volumes:
+      - ./backend:/app
+      - backend_node_modules:/app/node_modules
+    command: npm run dev
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    container_name: maxai-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_BACKEND_URL: http://localhost:4000
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend-prod:
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        VITE_BACKEND_URL: http://localhost:4000
+    container_name: maxai-frontend-prod
+    profiles: ["prod"]
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend-prod
+    restart: unless-stopped
+
+  backend-prod:
+    build:
+      context: ./backend
+    container_name: maxai-backend-prod
+    profiles: ["prod"]
+    ports:
+      - "4000:4000"
+    env_file:
+      - path: ../.env.local
+        required: false
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+    command: npm start
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  backend_node_modules:
+  frontend_node_modules:

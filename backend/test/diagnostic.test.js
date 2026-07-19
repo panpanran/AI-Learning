@@ -55,7 +55,17 @@ describe('Diagnostic endpoints', () => {
         const login = await request(app).post('/auth/mock-login').send({ username: 't', password: 'pw', mode: 'register' })
         const token = login.body.token
 
-        const resp = await request(app).post('/api/generate/diagnostic').send({ token, grade: 'G1', subject: 'math', lang: 'en' })
+        const progress = await request(app).post('/api/generation-progress').send({ token, kind: 'diagnostic' })
+        expect(progress.status).toBe(201)
+        expect(progress.body.stage).toBe('queued')
+
+        const resp = await request(app).post('/api/generate/diagnostic').send({
+            token,
+            grade: 'G1',
+            subject: 'math',
+            lang: 'en',
+            progress_id: progress.body.id,
+        })
         expect(resp.status).toBe(200)
         expect(resp.body.generated).toBeTruthy()
         expect(Array.isArray(resp.body.questions)).toBe(true)
@@ -66,6 +76,13 @@ describe('Diagnostic endpoints', () => {
         const ok = validate(toValidate)
         if (!ok) console.error('Schema errors:', validate.errors)
         expect(ok).toBe(true)
+
+        const progressDone = await request(app)
+            .get(`/api/generation-progress/${progress.body.id}`)
+            .set('Authorization', `Bearer ${token}`)
+        expect(progressDone.status).toBe(200)
+        expect(progressDone.body.stage).toBe('completed')
+        expect(progressDone.body.percent).toBe(100)
     })
 
     it('submit diagnostic uses provided lesson without Pinecone writes', async () => {

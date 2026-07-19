@@ -1,18 +1,44 @@
-# 忽略任何目录下的 node_modules 文件夹
+# Dependencies / build
 **/node_modules/
-
-# 忽略任何目录下的构建缓存
 **/.vite/
 **/dist/
+**/build/
+*.tsbuildinfo
 
-# Env 文件
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+
+# Env / secrets
 .env
 .env.local
 **/.env*
+!.env.example
+!**/.env.example
+!.env.docker.example
 
-# VS Code
+# Editors / OS
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
 
-# Logs
+# Logs / local runtime
 logs/
 *.log
+npm-debug.log*
+ragas/inbox/
+ragas/audit_log.jsonl
+ragas/buffer.jsonl
+ragas/.venv/
+
+# Local helper scratch
+scripts/temp.ps1
+backend/scripts/_tmp_*.js
