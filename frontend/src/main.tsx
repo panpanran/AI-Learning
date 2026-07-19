@@ -8,11 +8,14 @@ import AllCorrect from './AllCorrect'
 import Results from './Results'
 import HistoryRoute from './HistoryRoute'
 import ScoresRoute from './ScoresRoute'
+import AppVersionBadge from './AppVersionBadge'
 import './i18n'
+import './index.css'
 
 createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
         <BrowserRouter>
+            <AppVersionBadge />
             <Routes>
                 <Route path="/" element={<OAuthLogin />} />
                 <Route path="/login" element={<OAuthLogin />} />
