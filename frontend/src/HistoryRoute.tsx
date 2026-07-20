@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import HistoryPage from './HistoryPage'
@@ -13,19 +13,11 @@ export default function HistoryRoute() {
         i18n.changeLanguage(lng)
     }
 
-    if (!token) {
-        return (
-            <div className="container" style={{ justifyContent: 'center' }}>
-                <div className="hero-card" style={{ maxWidth: 820 }}>
-                    <h2 style={{ textAlign: 'center', marginTop: 0 }}>{t('history')}</h2>
-                    <div className="placeholder">{t('please_login')}</div>
-                    <div style={{ textAlign: 'center' }}>
-                        <button className="btn primary" onClick={() => navigate('/')}>{t('login')}</button>
-                    </div>
-                </div>
-            </div>
-        )
-    }
+    useEffect(() => {
+        if (!token) navigate('/', { replace: true })
+    }, [token, navigate])
+
+    if (!token) return null
 
     return (
         <div className="container" style={{ justifyContent: 'center' }}>

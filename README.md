@@ -5,12 +5,15 @@ Max AI Learning is an intelligent learning platform supporting multi-subject, mu
 
 ## Features
 
-- React frontend (Vite)
-- Express backend (JWT, OAuth, OpenAI 4.1 integration)
+- React frontend (Vite) + Express backend (JWT, OpenAI)
 - Chinese/English switching (i18next)
 - Grade/subject selection with saved preferences
 - Pinecone vector retrieval, mistake notebook, targeted practice
-- OpenAI 4.1 powered question generation
+- Multi-agent question generation (plan → generate → dedupe → evaluate/refine)
+- Live generation progress bar (diagnostic + knowledge-point practice)
+- Quality feedback loop (Ragas/judge → `question_feedback` + auto `prompt_patches`)
+- Build-time version badge in the UI corner (`vYYYY.MMDD.HHmm`, updates on each Render deploy)
+- SPA deep-link support (`/app`, `/scores`, …) via `frontend/public/_redirects`; expired sessions redirect to login
 
 ## Quick Start (Local)
 
@@ -109,10 +112,15 @@ This commits dirty files (if any), `git push origin master`, and optionally hits
 ```powershell
 cd "C:\Users\panpa\Notes\Project\Python\AI Learning\maxailearning"
 git status
-git add -A
+# Prefer adding specific paths — avoid `git add -A` (it can pick up .venv / build junk)
+git add README.md frontend/src frontend/public/_redirects frontend/vite.config.js
 git commit -m "your short summary"
 git push origin master
 ```
+
+Frontend SPA note: Render Static Site must serve `index.html` for client routes. This repo ships `frontend/public/_redirects` (`/* → /index.html 200`). Without it, refreshing `/app` returns **Not Found**.
+
+Build version: each `npm run build` injects `VITE_APP_VERSION` (see `frontend/vite.config.js`). After deploy, check the top-left badge or the browser tab title (`Max AI Learning v…`).
 
 Then open the Render dashboards above and wait until both Frontend and Backend show a successful deploy (often 2–5 minutes). Free-tier services may cold-start on the first request.
 

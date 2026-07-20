@@ -104,30 +104,44 @@ function App() {
     }, [location]);
 
     useEffect(() => {
-        // 只在/app下检查token，未登录不跳转，避免loop
-        if (window.location.pathname.startsWith('/app')) {
-            const t = localStorage.getItem('token');
-            const u = localStorage.getItem('user');
-            if (!token || !u) {
-                if (t && u) {
-                    setToken(t);
-                    setUser(JSON.parse(u));
-                    return;
+        // 只在/app下检查token；未登录或会话失效 → 回主页登录
+        if (!window.location.pathname.startsWith('/app')) return
+
+        const t = localStorage.getItem('token')
+        const u = localStorage.getItem('user')
+        if (!token || !u) {
+            if (t && u) {
+                try {
+                    setToken(t)
+                    setUser(JSON.parse(u))
+                } catch {
+                    localStorage.clear()
+                    navigate('/', { replace: true })
                 }
-                navigate('/');
-                return;
+                return
             }
-            // 获取用户信息
-            try {
-                const p = (API as any).get ? (API as any).get('/me', { headers: { Authorization: `Bearer ${token}` } }) : Promise.resolve({ data: { user: null } })
-                Promise.resolve(p).then((r: any) => {
-                    setUser(r.data?.user);
-                    localStorage.setItem('user', JSON.stringify(r.data?.user));
-                }).catch(() => { })
-            } catch (e) {
-                // swallow
-            }
+            navigate('/', { replace: true })
+            return
         }
+
+        const p = (API as any).get
+            ? (API as any).get('/me', { headers: { Authorization: `Bearer ${token}` } })
+            : Promise.resolve({ data: { user: null } })
+        Promise.resolve(p).then((r: any) => {
+            if (r?.data?.user) {
+                setUser(r.data.user)
+                localStorage.setItem('user', JSON.stringify(r.data.user))
+            }
+        }).catch((err: any) => {
+            const status = err?.response?.status
+            if (status === 401 || status === 403) {
+                localStorage.removeItem('token')
+                localStorage.removeItem('user')
+                setToken(null)
+                setUser(null)
+                navigate('/', { replace: true })
+            }
+        })
     }, [token, navigate])
 
     const doLogin = async () => {

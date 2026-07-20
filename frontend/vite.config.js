@@ -15,7 +15,6 @@ function buildAppVersion(date = new Date()) {
     const parts = Object.fromEntries(
         fmt.formatToParts(date).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
     )
-    // en-US hour12:false can yield "24" for midnight — normalize to "00"
     const hour = parts.hour === '24' ? '00' : parts.hour
     return `v${parts.year}.${parts.month}${parts.day}.${hour}${parts.minute}`
 }
@@ -26,6 +25,8 @@ const appBuildVersion = process.env.VITE_APP_VERSION || buildAppVersion()
 export default defineConfig({
     plugins: [react()],
     define: {
+        // Prefer import.meta.env (reliable with Vite); keep legacy define as fallback.
+        'import.meta.env.VITE_APP_VERSION': JSON.stringify(appBuildVersion),
         __APP_BUILD_VERSION__: JSON.stringify(appBuildVersion),
     },
     server: {

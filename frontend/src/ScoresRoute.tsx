@@ -154,6 +154,10 @@ function ScoresRoute() {
     const PRACTICE_NUM_QUESTIONS = 5
 
     useEffect(() => {
+        if (!token) navigate('/', { replace: true })
+    }, [token, navigate])
+
+    useEffect(() => {
         let cancelled = false
         const run = async () => {
             if (!token) return

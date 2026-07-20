@@ -38,6 +38,15 @@ ragas/inbox/
 ragas/audit_log.jsonl
 ragas/buffer.jsonl
 ragas/.venv/
+ragas/ragas_result.json
+ragas/*.result.json
+
+# One-off / unused hosting experiments (not used on Render)
+frontend/api/
+frontend/vercel.json
+frontend/netlify.toml
+frontend/public/og.jpg
+frontend/public/og.png
 
 # Local helper scratch
 scripts/temp.ps1
