@@ -1,2 +1,5 @@
-# SPA fallback: refresh / deep-link any client route → index.html
+# Netlify / Cloudflare Pages style SPA fallback (copied into dist/).
+# Render.com Static Sites IGNORE this file for routing — configure Dashboard
+# Redirects/Rewrites: Source /* → Destination /index.html → Action Rewrite
+# (see repo render.yaml and README).
 /*    /index.html   200

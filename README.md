@@ -13,7 +13,7 @@ Max AI Learning is an intelligent learning platform supporting multi-subject, mu
 - Live generation progress bar (diagnostic + knowledge-point practice)
 - Quality feedback loop (Ragas/judge → `question_feedback` + auto `prompt_patches`)
 - Build-time version badge in the UI corner (`vYYYY.MMDD.HHmm`, updates on each Render deploy)
-- SPA deep-link support (`/app`, `/scores`, …) via `frontend/public/_redirects`; expired sessions redirect to login
+- SPA deep-link support (`/app`, `/history`, …): Render needs a **Rewrite** `/* → /index.html` (Dashboard or `render.yaml`). Netlify-style `_redirects` alone is not enough on Render. Expired sessions redirect to login.
 
 ## Quick Start (Local)
 
@@ -118,7 +118,15 @@ git commit -m "your short summary"
 git push origin master
 ```
 
-Frontend SPA note: Render Static Site must serve `index.html` for client routes. This repo ships `frontend/public/_redirects` (`/* → /index.html 200`). Without it, refreshing `/app` returns **Not Found**.
+Frontend SPA note: **Render Static Sites ignore Netlify `_redirects` for routing.** Without a Dashboard rewrite, refreshing or opening `/app` returns plain **Not Found**.
+
+Add once (takes effect immediately, no redeploy):
+
+1. Open https://dashboard.render.com/static/srv-d5sjua7fte5s73cdo90g  
+2. **Redirects/Rewrites** → Add  
+3. Source: `/*` · Destination: `/index.html` · Action: **Rewrite**
+
+Repo also has `render.yaml` with the same rule for Blueprint sync. `frontend/public/_redirects` remains for Netlify/Vercel-style hosts.
 
 Build version: each `npm run build` injects `VITE_APP_VERSION` (see `frontend/vite.config.js`). After deploy, check the top-left badge or the browser tab title (`Max AI Learning v…`).
 

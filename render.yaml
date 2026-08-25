@@ -1,0 +1,21 @@
+# Render Blueprint — SPA rewrite for client routes (/app, /history, …).
+# Render Static Sites do NOT honor Netlify-style public/_redirects for routing;
+# they need Dashboard Redirects/Rewrites or this Blueprint `routes` field.
+#
+# If services already exist in the Dashboard, either:
+#   A) Add rewrite manually (instant):
+#      https://dashboard.render.com/static/srv-d5sjua7fte5s73cdo90g
+#      → Redirects/Rewrites → Source /*  Destination /index.html  Action Rewrite
+#   B) Or link/sync this blueprint carefully so it does not duplicate services.
+
+services:
+  - type: web
+    runtime: static
+    name: maxai-frontend
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

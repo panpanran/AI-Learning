@@ -303,6 +303,16 @@ function Show-Status {
         Test-ServiceHealth 'render-backend-alt' "$RenderBackendUrlAlt/api/meta/grades" | Out-Null
     }
     Test-ServiceHealth 'render-frontend' $RenderFrontendUrl | Out-Null
+    # SPA deep links need Dashboard Rewrite /* → /index.html (Render ignores _redirects)
+    $spaUrl = ($RenderFrontendUrl.TrimEnd('/') + '/app')
+    $spaOk = Test-ServiceHealth 'render-frontend-/app' $spaUrl
+    if (-not $spaOk) {
+        Write-Host ''
+        Write-Host 'SPA rewrite missing: /app returns Not Found.' -ForegroundColor Yellow
+        Write-Host 'Fix (instant, no redeploy):' -ForegroundColor Yellow
+        Write-Host "  $RenderFrontendDashboard"
+        Write-Host '  → Redirects/Rewrites → Source /*  Destination /index.html  Action Rewrite'
+    }
 
     Write-Host ''
     Write-Host "Frontend dashboard: $RenderFrontendDashboard"
