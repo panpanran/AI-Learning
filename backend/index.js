@@ -463,6 +463,7 @@ const {
     ensureUserQuestionFeedbackTable,
     insertUserQuestionFeedback,
 } = require('./lib/feedbackStore');
+const { queueUserFeedbackTriage } = require('./lib/userFeedbackTriage');
 const { registerDiagnosticRoutes, reportDiagnosticQuality } = require('./routes/diagnostic');
 
 // Postgres support (optional).
@@ -3973,7 +3974,7 @@ app.get('/api/history/full', async (req, res) => {
 
 
 // Parent/student free-text feedback on a scored question (feeds next diagnostic prompt).
-// Does NOT auto-rewrite questions.answer_* / explanation_* — that needs a review step.
+// Phase 2: async triage may propose/apply safe math fixes — response is not blocked on OpenAI.
 app.post('/api/user-feedback', async (req, res) => {
     const auth = req.headers.authorization;
     if (!auth) return res.status(401).json({ error: 'Unauthorized' });
@@ -3995,7 +3996,16 @@ app.post('/api/user-feedback', async (req, res) => {
             category,
             givenAnswer,
         });
-        return res.json({ ok: true, feedback: saved });
+
+        // Async: classify + optional safe apply (AC-4: do not block HTTP on OpenAI).
+        queueUserFeedbackTriage({
+            pool,
+            feedbackId: saved.id,
+            aiClient: getOpenAI(),
+            createChatCompletionJson,
+        });
+
+        return res.json({ ok: true, feedback: saved, triage: 'queued' });
     } catch (e) {
         const status = e && e.status ? Number(e.status) : 0;
         if (status === 400 || status === 404) {

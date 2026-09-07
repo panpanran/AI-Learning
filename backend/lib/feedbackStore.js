@@ -367,7 +367,7 @@ async function getUserReportsForPrompt(pool, { gradeId, subjectId, knowledgePoin
 
     params.push(lim);
     const res = await pool.query(
-        `SELECT id, question_id, knowledge_point_id, category, comment
+        `SELECT id, question_id, knowledge_point_id, category, comment, status, proposed_fix
          FROM user_question_feedback
          WHERE ${where}
          ORDER BY created_at DESC
@@ -375,12 +375,19 @@ async function getUserReportsForPrompt(pool, { gradeId, subjectId, knowledgePoin
         params
     );
 
-    const reports = (res.rows || []).map((row) => ({
-        question_id: row.question_id != null ? Number(row.question_id) : null,
-        knowledge_point_id: row.knowledge_point_id != null ? Number(row.knowledge_point_id) : null,
-        category: row.category || 'other',
-        comment: String(row.comment || '').slice(0, 400),
-    }));
+    const reports = (res.rows || []).map((row) => {
+        const pf = row.proposed_fix && typeof row.proposed_fix === 'object' ? row.proposed_fix : null;
+        return {
+            question_id: row.question_id != null ? Number(row.question_id) : null,
+            knowledge_point_id: row.knowledge_point_id != null ? Number(row.knowledge_point_id) : null,
+            category: row.category || 'other',
+            status: row.status || 'open',
+            comment: String(row.comment || '').slice(0, 400),
+            proposed_summary: pf
+                ? String(pf.reason || pf.answer_en || pf.answer_cn || '').slice(0, 200)
+                : null,
+        };
+    });
 
     return {
         reports,
