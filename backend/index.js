@@ -74,10 +74,15 @@ function safeParseJsonObject(text) {
 
 async function createChatCompletionJson(aiClient, params) {
     // Prefer JSON mode when supported; fall back gracefully for older/unsupported models.
+    // Honor caller temperature when provided (diagnostic generation needs diversity; judges stay at 0).
+    const temperature = (params && Number.isFinite(Number(params.temperature)))
+        ? Number(params.temperature)
+        : 0;
+    const { temperature: _ignoredTemp, ...rest } = (params && typeof params === 'object') ? params : {};
     try {
         return await aiClient.chat.completions.create({
-            ...params,
-            temperature: 0,
+            ...rest,
+            temperature,
             response_format: { type: 'json_object' }
         });
     } catch (e) {
@@ -85,8 +90,8 @@ async function createChatCompletionJson(aiClient, params) {
         // Unknown parameter/model not supporting response_format
         if (msg.toLowerCase().includes('response_format') || msg.toLowerCase().includes('unknown parameter')) {
             return await aiClient.chat.completions.create({
-                ...params,
-                temperature: 0
+                ...rest,
+                temperature
             });
         }
         throw e;
@@ -452,7 +457,12 @@ try {
 }
 
 const { parseGradeLevelLoose, getGradeGuidance } = require('./lib/gradeGuidance');
-const { loadFeedbackContextForPrompt, isFeedbackStoreEnabled } = require('./lib/feedbackStore');
+const {
+    loadFeedbackContextForPrompt,
+    isFeedbackStoreEnabled,
+    ensureUserQuestionFeedbackTable,
+    insertUserQuestionFeedback,
+} = require('./lib/feedbackStore');
 const { registerDiagnosticRoutes, reportDiagnosticQuality } = require('./routes/diagnostic');
 
 // Postgres support (optional).
@@ -829,6 +839,11 @@ async function ensureTables() {
         try {
             await pool.query('CREATE INDEX IF NOT EXISTS prompt_patches_scope_idx ON prompt_patches(scope, scope_id, active, created_at DESC)');
         } catch (e) { }
+        try {
+            await ensureUserQuestionFeedbackTable(pool);
+        } catch (e) {
+            console.warn('user_question_feedback ensure skipped (non-fatal).', e.message || e);
+        }
 
         // --- Knowledge points schema migration (legacy text id -> integer id; name -> name_cn/name_en) ---
         // Old versions used knowledge_points.id as TEXT and questions/student_knowledge_scores.knowledge_point_id as TEXT.
@@ -1362,10 +1377,28 @@ async function dedupeQuestionsBeforeInsert({ questions, pcClient, userIds, grade
     const withHash = (Array.isArray(questions) ? questions : []).map(q => ensureContentOptionsHash(q));
     const layer1 = uniqueByContentOptionsHash(withHash);
 
+    // Layer 1b: structural type+nums near-dupe within the batch
+    const layer1b = uniqueByStructuralKey(layer1);
+
+    // Layer 1c: reject type+nums already present in the global question bank (same grade/subject)
+    let dbStructuralKeys = new Set();
+    try {
+        dbStructuralKeys = await fetchStructuralKeysInDb({ gradeId, subjectId });
+    } catch {
+        dbStructuralKeys = new Set();
+    }
+    const layer1c = [];
+    for (const q of layer1b) {
+        const key = computeMetadataStructuralKey(q && q.metadata);
+        if (key && dbStructuralKeys.has(key)) continue;
+        if (key) dbStructuralKeys.add(key);
+        layer1c.push(q);
+    }
+
     // Layer 2: ensure metadata embeddings are present in q.embedding (GLOBAL: no user info)
     const embedInputs = [];
     const embedTargets = [];
-    for (const q of layer1) {
+    for (const q of layer1c) {
         if (!q || !q.metadata) continue;
         const v = coerceEmbeddingArray(q.embedding);
         if (v) continue;
@@ -1391,7 +1424,7 @@ async function dedupeQuestionsBeforeInsert({ questions, pcClient, userIds, grade
 
     // Layer 3: 新生成的题里语义重复过滤
     const kept = [];
-    for (const q of layer1) {
+    for (const q of layer1c) {
         const v = q ? coerceEmbeddingArray(q.embedding) : null;
         if (!v) {
             kept.push(q);
@@ -1498,6 +1531,113 @@ function normalizeQuestionMetadata(metadata) {
         out[String(k)] = normalizeMetadataValue(v);
     }
     return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Structural near-dupe key: same math type + same numbers (order-insensitive)
+ * collapses paraphrases like "299 + 501 mental strategy" across knowledge points.
+ * Returns null when metadata has no stable numeric fingerprint.
+ */
+function computeMetadataStructuralKey(metadata) {
+    const m = normalizeQuestionMetadata(metadata);
+    if (!m || typeof m !== 'object') return null;
+    const t = (m.type != null) ? String(m.type).trim().toLowerCase() : '';
+    if (!t) return null;
+    if (Array.isArray(m.nums) && m.nums.length) {
+        const nums = m.nums.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+        if (!nums.length) return null;
+        return `${t}|${nums.join(',')}`;
+    }
+    if (t === 'vocabulary' && m.word != null) {
+        const w = String(m.word).trim().toLowerCase();
+        return w ? `${t}|${w}` : null;
+    }
+    return null;
+}
+
+function uniqueByStructuralKey(questions) {
+    const seen = new Set();
+    const out = [];
+    for (const q of questions || []) {
+        const key = computeMetadataStructuralKey(q && q.metadata);
+        if (key) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+        out.push(q);
+    }
+    return out;
+}
+
+async function fetchStructuralKeysInDb({ gradeId, subjectId }) {
+    if (!useDb) return new Set();
+    if (!Number.isInteger(Number(gradeId)) || !Number.isInteger(Number(subjectId))) return new Set();
+    try {
+        const r = await pool.query(
+            `SELECT metadata
+             FROM questions
+             WHERE grade_id = $1
+               AND subject_id = $2
+               AND metadata IS NOT NULL
+             ORDER BY id DESC
+             LIMIT 4000`,
+            [Number(gradeId), Number(subjectId)]
+        );
+        const keys = new Set();
+        for (const row of (r.rows || [])) {
+            const k = computeMetadataStructuralKey(row.metadata);
+            if (k) keys.add(k);
+        }
+        return keys;
+    } catch {
+        return new Set();
+    }
+}
+
+/**
+ * Global bank patterns (not just one student's history): top type+nums fingerprints
+ * so the model stops recycling examples like 299+501 across many knowledge points.
+ */
+async function fetchGlobalAvoidMetadataObjects({ gradeId, subjectId, limit = 20 }) {
+    if (!useDb) return [];
+    if (!Number.isInteger(Number(gradeId)) || !Number.isInteger(Number(subjectId))) return [];
+    const lim = Math.max(1, Math.min(50, Number(limit) || 20));
+    try {
+        const r = await pool.query(
+            `SELECT metadata
+             FROM questions
+             WHERE grade_id = $1
+               AND subject_id = $2
+               AND metadata IS NOT NULL
+             ORDER BY id DESC
+             LIMIT 1500`,
+            [Number(gradeId), Number(subjectId)]
+        );
+        const counts = new Map();
+        const examples = new Map();
+        for (const row of (r.rows || [])) {
+            const meta = normalizeQuestionMetadata(row.metadata);
+            const key = computeMetadataStructuralKey(meta);
+            if (!key || !meta) continue;
+            counts.set(key, (counts.get(key) || 0) + 1);
+            if (!examples.has(key)) {
+                // Strip context so avoid list focuses on type+nums, not wording.
+                examples.set(key, {
+                    type: meta.type,
+                    nums: Array.isArray(meta.nums) ? meta.nums : undefined,
+                    word: meta.word,
+                    context: null,
+                });
+            }
+        }
+        return [...counts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, lim)
+            .map(([key]) => examples.get(key))
+            .filter(Boolean);
+    } catch {
+        return [];
+    }
 }
 
 function buildMetadataEmbeddingText(metadata) {
@@ -1801,7 +1941,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     const missing = n - questionsOut.length;
     let askN = missing + 5;
 
-    // Find top-5 most frequent metadata patterns in this student's history (optionally scoped to a KP).
+    // Find top frequent metadata patterns: student history + global bank (type+nums).
     let avoidMetadataObjects = [];
     try {
         const params = [studentUserIds, Number(gradeId), Number(subjectId)];
@@ -1830,6 +1970,24 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
             .filter(Boolean);
     } catch {
         avoidMetadataObjects = [];
+    }
+    try {
+        const globalAvoid = await fetchGlobalAvoidMetadataObjects({
+            gradeId: Number(gradeId),
+            subjectId: Number(subjectId),
+            limit: 20,
+        });
+        const seenKeys = new Set(
+            avoidMetadataObjects.map(m => computeMetadataStructuralKey(m)).filter(Boolean)
+        );
+        for (const m of globalAvoid) {
+            const k = computeMetadataStructuralKey(m);
+            if (k && seenKeys.has(k)) continue;
+            if (k) seenKeys.add(k);
+            avoidMetadataObjects.push(m);
+        }
+    } catch {
+        // non-fatal
     }
     if (avoidMetadataObjects.length) {
         askN = missing + 10;
@@ -1870,7 +2028,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
         retrieval_snippets: JSON.stringify(retrieval_snippets),
         knowledge_points: JSON.stringify(knowledgePointsForPrompt),
         knowledge_point_ids_plan: JSON.stringify(knowledge_point_ids_plan),
-        avoid_metadata: JSON.stringify(avoidMetadataObjects.slice(0, 5)),
+        avoid_metadata: JSON.stringify(avoidMetadataObjects.slice(0, 25)),
         grade_guidance: getGradeGuidance({ useLang, studentProfile: student_profile, gradeLevel, gradeCode, subjectCode }),
         feedback_context: await loadFeedbackContextForPrompt(pool, {
             gradeId,
@@ -1885,6 +2043,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
         progress('generating', 42, 'AI is generating questions');
         completion = await createChatCompletionJson(aiClient, {
             model,
+            temperature: Number(process.env.DIAG_GEN_TEMPERATURE) || 0.55,
             messages: [
                 { role: 'system', content: sysTpl },
                 { role: 'user', content: userMessage },
@@ -1930,6 +2089,16 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
     }
 
     const accepted = [];
+    const batchStructuralKeys = new Set();
+    let dbStructuralKeysEarly = new Set();
+    try {
+        dbStructuralKeysEarly = await fetchStructuralKeysInDb({
+            gradeId: Number(gradeId),
+            subjectId: Number(subjectId),
+        });
+    } catch {
+        dbStructuralKeysEarly = new Set();
+    }
     for (const c of candidates) {
         const opt = c.__opt || extractBilingualOptions(c.options);
         if (!opt) continue;
@@ -1940,13 +2109,18 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
         if (typeof c.answer_en !== 'string' || typeof c.answer_cn !== 'string') continue;
         if (inDb.has(c.content_options_hash)) continue;
 
+        const meta = normalizeQuestionMetadata(c.metadata) || null;
+        const sk = computeMetadataStructuralKey(meta);
+        if (sk && (batchStructuralKeys.has(sk) || dbStructuralKeysEarly.has(sk))) continue;
+        if (sk) batchStructuralKeys.add(sk);
+
         accepted.push({
             type: 'mcq',
             content_cn: c.content_cn,
             content_en: c.content_en,
             options: { zh: optsZh, en: optsEn },
             content_options_hash: c.content_options_hash,
-            metadata: normalizeQuestionMetadata(c.metadata) || null,
+            metadata: meta,
             answer_cn: c.answer_cn,
             answer_en: c.answer_en,
             explanation_cn: c.explanation_cn,
@@ -2681,6 +2855,7 @@ app.post('/api/generate/diagnostic__legacy', async (req, res) => {
             try {
                 completion = await createChatCompletionJson(aiClient, {
                     model,
+                    temperature: Number(process.env.DIAG_GEN_TEMPERATURE) || 0.55,
                     messages: [
                         { role: 'system', content: sysTpl },
                         { role: 'user', content: userMessage }
@@ -3796,6 +3971,43 @@ app.get('/api/history/full', async (req, res) => {
     }
 });
 
+
+// Parent/student free-text feedback on a scored question (feeds next diagnostic prompt).
+// Does NOT auto-rewrite questions.answer_* / explanation_* — that needs a review step.
+app.post('/api/user-feedback', async (req, res) => {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+    if (!useDb) return res.status(503).json({ error: 'Database required for feedback' });
+
+    try {
+        const token = auth.replace('Bearer ', '');
+        const data = jwt.verify(token, JWT_SECRET);
+        const body = req.body || {};
+        const questionId = body.question_id != null ? Number(body.question_id) : null;
+        const comment = body.comment != null ? String(body.comment) : '';
+        const category = body.category != null ? String(body.category) : 'other';
+        const givenAnswer = body.given_answer != null ? String(body.given_answer) : null;
+
+        const saved = await insertUserQuestionFeedback(pool, {
+            userId: data.id,
+            questionId,
+            comment,
+            category,
+            givenAnswer,
+        });
+        return res.json({ ok: true, feedback: saved });
+    } catch (e) {
+        const status = e && e.status ? Number(e.status) : 0;
+        if (status === 400 || status === 404) {
+            return res.status(status).json({ error: e.message || 'Bad request' });
+        }
+        if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        console.error('[user-feedback] insert failed:', e && e.message ? e.message : e);
+        return res.status(500).json({ error: 'Failed to save feedback' });
+    }
+});
 
 // Knowledge point scores (accuracy %) grouped by grade + subject + knowledge_point_id
 // score = correct_count / total_count * 100

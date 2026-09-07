@@ -30,6 +30,11 @@ type QuestionRow = {
     explanation_en?: string
 }
 
+type FeedbackTarget = {
+    questionId: number
+    given: string
+}
+
 function Results() {
     const location = useLocation()
     const navigate = useNavigate()
@@ -68,6 +73,11 @@ function Results() {
     const resumeSubjectId = selectionFromState.subjectId || selectionFromLast.subjectId
 
     const [questionById, setQuestionById] = useState<Record<string, QuestionRow>>({})
+    const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null)
+    const [feedbackText, setFeedbackText] = useState('')
+    const [feedbackBusy, setFeedbackBusy] = useState(false)
+    const [feedbackNote, setFeedbackNote] = useState('')
+    const [feedbackDoneIds, setFeedbackDoneIds] = useState<Record<string, true>>({})
 
     useEffect(() => {
         let cancelled = false
@@ -113,6 +123,60 @@ function Results() {
     }, [answers])
 
     const dbLookup = useMemo(() => questionById || {}, [questionById])
+
+    const openFeedback = (a: ResultItem) => {
+        const qid = Number(a.questionId)
+        if (!Number.isInteger(qid)) return
+        setFeedbackTarget({ questionId: qid, given: String(a.given || '') })
+        setFeedbackText('')
+        setFeedbackNote('')
+    }
+
+    const closeFeedback = () => {
+        if (feedbackBusy) return
+        setFeedbackTarget(null)
+        setFeedbackText('')
+        setFeedbackNote('')
+    }
+
+    const submitFeedback = async () => {
+        if (!feedbackTarget) return
+        const comment = feedbackText.trim()
+        if (!comment) {
+            setFeedbackNote(t('feedback_empty'))
+            return
+        }
+        const token = localStorage.getItem('token')
+        if (!token) {
+            setFeedbackNote(t('feedback_failed'))
+            return
+        }
+        setFeedbackBusy(true)
+        setFeedbackNote('')
+        try {
+            await API.post(
+                '/api/user-feedback',
+                {
+                    question_id: feedbackTarget.questionId,
+                    comment,
+                    category: 'other',
+                    given_answer: feedbackTarget.given || null,
+                },
+                { headers: { Authorization: `Bearer ${token}` } }
+            )
+            setFeedbackDoneIds(prev => ({ ...prev, [String(feedbackTarget.questionId)]: true }))
+            setFeedbackNote(t('feedback_sent'))
+            setTimeout(() => {
+                setFeedbackTarget(null)
+                setFeedbackText('')
+                setFeedbackNote('')
+                setFeedbackBusy(false)
+            }, 700)
+        } catch {
+            setFeedbackBusy(false)
+            setFeedbackNote(t('feedback_failed'))
+        }
+    }
 
     if (!answers.length) {
         return (
@@ -217,6 +281,7 @@ function Results() {
                                 const content = contentFromDb || (lang === 'zh' ? (a.content_cn || '') : (a.content_en || '')) || a.content || ''
                                 const correctAnswer = answerFromDb || (lang === 'zh' ? (a.answer_cn || '') : (a.answer_en || '')) || a.correctAnswer || ''
                                 const explanation = expFromDb || (lang === 'zh' ? (a.explanation_cn || '') : (a.explanation_en || '')) || a.explanation || ''
+                                const alreadySent = !!feedbackDoneIds[String(a.questionId)]
 
                                 return (
                                     <>
@@ -253,6 +318,17 @@ function Results() {
                                                 <div className="ai-text">{explanation}</div>
                                             </div>
                                         ) : null}
+
+                                        <div style={{ marginTop: 12 }}>
+                                            <button
+                                                type="button"
+                                                className="btn"
+                                                disabled={alreadySent}
+                                                onClick={() => openFeedback(a)}
+                                            >
+                                                {alreadySent ? t('feedback_sent') : t('feedback')}
+                                            </button>
+                                        </div>
                                     </>
                                 )
                             })()}
@@ -280,6 +356,42 @@ function Results() {
                     </button>
                 </div>
             </div>
+
+            {feedbackTarget ? (
+                <div
+                    className="feedback-modal-backdrop"
+                    role="presentation"
+                    onClick={closeFeedback}
+                >
+                    <div
+                        className="feedback-modal"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={t('feedback_title')}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div style={{ fontWeight: 700, marginBottom: 10 }}>{t('feedback_title')}</div>
+                        <textarea
+                            value={feedbackText}
+                            onChange={(e) => setFeedbackText(e.target.value)}
+                            placeholder={t('feedback_placeholder')}
+                            maxLength={2000}
+                            disabled={feedbackBusy}
+                        />
+                        {feedbackNote ? (
+                            <div className="meta" style={{ marginTop: 8 }}>{feedbackNote}</div>
+                        ) : null}
+                        <div className="feedback-modal-actions">
+                            <button type="button" className="btn" onClick={closeFeedback} disabled={feedbackBusy}>
+                                {t('close')}
+                            </button>
+                            <button type="button" className="btn primary" onClick={submitFeedback} disabled={feedbackBusy}>
+                                {t('submit')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
         </div>
     )
 }

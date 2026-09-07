@@ -228,7 +228,177 @@ function emptyFeedbackContext() {
         few_shot_good: [],
         avoid_patterns: [],
         prompt_patches: [],
+        user_reports: [],
     };
+}
+
+const USER_REPORT_LIMIT = Number(process.env.FEEDBACK_USER_REPORT_LIMIT) || 5;
+
+async function ensureUserQuestionFeedbackTable(pool) {
+    if (!pool) return false;
+    await pool.query(`CREATE TABLE IF NOT EXISTS user_question_feedback (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        question_id INTEGER NOT NULL,
+        knowledge_point_id INTEGER,
+        grade_id INTEGER,
+        subject_id INTEGER,
+        category TEXT,
+        comment TEXT NOT NULL,
+        given_answer TEXT,
+        status TEXT DEFAULT 'open',
+        proposed_fix JSONB,
+        applied_at TIMESTAMPTZ,
+        used_in_prompt_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    try {
+        await pool.query(
+            'CREATE INDEX IF NOT EXISTS user_question_feedback_q_idx ON user_question_feedback(question_id, created_at DESC)'
+        );
+    } catch { /* ignore */ }
+    try {
+        await pool.query(
+            'CREATE INDEX IF NOT EXISTS user_question_feedback_kp_status_idx ON user_question_feedback(knowledge_point_id, status, created_at DESC)'
+        );
+    } catch { /* ignore */ }
+    try {
+        await pool.query(
+            'CREATE INDEX IF NOT EXISTS user_question_feedback_user_idx ON user_question_feedback(user_id, created_at DESC)'
+        );
+    } catch { /* ignore */ }
+    return true;
+}
+
+/**
+ * Persist parent/student free-text feedback for a scored question.
+ * Does NOT mutate questions.* — corrections stay proposed until a review step.
+ */
+async function insertUserQuestionFeedback(pool, {
+    userId,
+    questionId,
+    comment,
+    category = 'other',
+    givenAnswer = null,
+}) {
+    if (!pool) throw new Error('pool required');
+    const uid = Number(userId);
+    const qid = Number(questionId);
+    const text = String(comment || '').trim();
+    if (!Number.isInteger(uid) || !Number.isInteger(qid) || !text) {
+        const err = new Error('user_id, question_id, and comment are required');
+        err.status = 400;
+        throw err;
+    }
+    if (text.length > 2000) {
+        const err = new Error('comment too long (max 2000)');
+        err.status = 400;
+        throw err;
+    }
+
+    await ensureUserQuestionFeedbackTable(pool);
+
+    const qRes = await pool.query(
+        `SELECT id, knowledge_point_id, grade_id, subject_id
+         FROM questions WHERE id = $1 LIMIT 1`,
+        [qid]
+    );
+    if (!qRes.rows[0]) {
+        const err = new Error('question not found');
+        err.status = 404;
+        throw err;
+    }
+    const q = qRes.rows[0];
+    const cat = String(category || 'other').trim().slice(0, 64) || 'other';
+
+    const ins = await pool.query(
+        `INSERT INTO user_question_feedback
+            (user_id, question_id, knowledge_point_id, grade_id, subject_id,
+             category, comment, given_answer, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'open')
+         RETURNING id, created_at, status`,
+        [
+            uid,
+            qid,
+            q.knowledge_point_id != null ? Number(q.knowledge_point_id) : null,
+            q.grade_id != null ? Number(q.grade_id) : null,
+            q.subject_id != null ? Number(q.subject_id) : null,
+            cat,
+            text,
+            givenAnswer != null ? String(givenAnswer).slice(0, 500) : null,
+        ]
+    );
+    return {
+        id: ins.rows[0].id,
+        status: ins.rows[0].status,
+        created_at: ins.rows[0].created_at,
+        question_id: qid,
+        knowledge_point_id: q.knowledge_point_id != null ? Number(q.knowledge_point_id) : null,
+    };
+}
+
+async function getUserReportsForPrompt(pool, { gradeId, subjectId, knowledgePointIds, limit }) {
+    if (!pool) return { reports: [], ids: [] };
+    try {
+        await ensureUserQuestionFeedbackTable(pool);
+    } catch {
+        return { reports: [], ids: [] };
+    }
+
+    const kpIds = (Array.isArray(knowledgePointIds) ? knowledgePointIds : [])
+        .map((id) => Number(id))
+        .filter(Number.isInteger);
+    const lim = Math.max(1, Math.min(20, Number(limit) || USER_REPORT_LIMIT));
+    const params = [];
+    let where = `status IN ('open', 'acknowledged')`;
+
+    if (Number.isInteger(Number(gradeId))) {
+        params.push(Number(gradeId));
+        where += ` AND (grade_id IS NULL OR grade_id = $${params.length})`;
+    }
+    if (Number.isInteger(Number(subjectId))) {
+        params.push(Number(subjectId));
+        where += ` AND (subject_id IS NULL OR subject_id = $${params.length})`;
+    }
+    if (kpIds.length) {
+        params.push(kpIds);
+        where += ` AND (knowledge_point_id IS NULL OR knowledge_point_id = ANY($${params.length}::int[]))`;
+    }
+
+    params.push(lim);
+    const res = await pool.query(
+        `SELECT id, question_id, knowledge_point_id, category, comment
+         FROM user_question_feedback
+         WHERE ${where}
+         ORDER BY created_at DESC
+         LIMIT $${params.length}`,
+        params
+    );
+
+    const reports = (res.rows || []).map((row) => ({
+        question_id: row.question_id != null ? Number(row.question_id) : null,
+        knowledge_point_id: row.knowledge_point_id != null ? Number(row.knowledge_point_id) : null,
+        category: row.category || 'other',
+        comment: String(row.comment || '').slice(0, 400),
+    }));
+
+    return {
+        reports,
+        ids: (res.rows || []).map((row) => Number(row.id)).filter(Number.isInteger),
+    };
+}
+
+async function markUserFeedbackUsed(pool, ids) {
+    const validIds = (Array.isArray(ids) ? ids : [])
+        .map((id) => Number(id))
+        .filter(Number.isInteger);
+    if (!validIds.length || !pool) return;
+    await pool.query(
+        `UPDATE user_question_feedback
+         SET used_in_prompt_at = NOW()
+         WHERE id = ANY($1::int[])`,
+        [validIds]
+    );
 }
 
 function scoreOf(scores, key) {
@@ -515,10 +685,11 @@ async function markFeedbackUsed(pool, ids) {
 async function getFeedbackContext(pool, { gradeId, subjectId, knowledgePointIds, lang }) {
     if (!pool || !isFeedbackStoreEnabled()) return emptyFeedbackContext();
 
-    const [fewShot, avoid, patches] = await Promise.all([
+    const [fewShot, avoid, patches, userReports] = await Promise.all([
         getFewShotExamples(pool, { knowledgePointIds, lang, limit: FEW_SHOT_LIMIT }),
         getAvoidPatterns(pool, { knowledgePointIds, limit: AVOID_PATTERN_LIMIT }),
         getPromptPatches(pool, { gradeId, subjectId, knowledgePointIds }),
+        getUserReportsForPrompt(pool, { gradeId, subjectId, knowledgePointIds, limit: USER_REPORT_LIMIT }),
     ]);
 
     const usedIds = [...fewShot.ids, ...avoid.ids];
@@ -527,11 +698,17 @@ async function getFeedbackContext(pool, { gradeId, subjectId, knowledgePointIds,
             console.error('[feedback] mark used failed:', err && err.message ? err.message : err);
         });
     }
+    if (userReports.ids.length) {
+        markUserFeedbackUsed(pool, userReports.ids).catch((err) => {
+            console.error('[feedback] mark user reports used failed:', err && err.message ? err.message : err);
+        });
+    }
 
     return {
         few_shot_good: fewShot.examples,
         avoid_patterns: avoid.patterns,
         prompt_patches: patches,
+        user_reports: userReports.reports,
     };
 }
 
@@ -543,7 +720,8 @@ async function loadFeedbackContextForPrompt(pool, opts) {
         const ctx = await getFeedbackContext(pool, opts);
         const hasContent = ctx.few_shot_good.length
             || ctx.avoid_patterns.length
-            || ctx.prompt_patches.length;
+            || ctx.prompt_patches.length
+            || (ctx.user_reports && ctx.user_reports.length);
         if (!hasContent) return JSON.stringify(emptyFeedbackContext());
         return JSON.stringify(ctx);
     } catch (err) {
@@ -591,6 +769,7 @@ async function ensureFeedbackTables(pool) {
     try {
         await pool.query('CREATE INDEX IF NOT EXISTS prompt_patches_scope_idx ON prompt_patches(scope, scope_id, active, created_at DESC)');
     } catch { /* ignore */ }
+    await ensureUserQuestionFeedbackTable(pool);
     return true;
 }
 
@@ -605,6 +784,9 @@ module.exports = {
     getFeedbackContext,
     loadFeedbackContextForPrompt,
     ensureFeedbackTables,
+    ensureUserQuestionFeedbackTable,
+    insertUserQuestionFeedback,
+    getUserReportsForPrompt,
     THRESHOLDS,
     AUTO_PATCH_TEMPLATES,
 };

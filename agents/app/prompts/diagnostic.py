@@ -31,11 +31,14 @@ IMPORTANT (feature extraction / metadata):
 - For MATH: {{"type":"division"|"multiplication"|"addition"|"subtraction"|"fraction"|"geometry"|"other","nums":number[],"context":string|null}}
 - For vocabulary: {{"type":"vocabulary","word":"...","context":"..."}}
 - Avoid similar patterns: {avoid_metadata}
+- HARD RULE for MATH: never reuse the same metadata.type + metadata.nums from avoid_metadata (e.g. do not keep generating 299+501). Pick fresh numbers every time.
+- Different knowledge_point_ids must still use different nums — do not recycle one arithmetic template across many knowledge points.
 
 Past diagnostic quality feedback (learn from this; do NOT copy questions verbatim): {feedback_context}
 - few_shot_good: high-scoring example questions for similar knowledge points
 - avoid_patterns: known failure patterns to avoid
 - prompt_patches: extra authoring rules from prior reviews — treat these as hard constraints
+- user_reports: parent/student reports about bad answers/explanations or weak items — fix those failure modes; do not repeat the reported mistake
 
 Knowledge points (do NOT invent new ones): {knowledge_points}.
 Required knowledge_point_ids_plan (length {num_questions}): {knowledge_point_ids_plan}. For question i, set knowledge_point_id === plan[i].
@@ -48,10 +51,12 @@ USER_ZH = """为学生生成诊断测试。输入：{student_profile}。
 你必须严格生成{num_questions}道题。所有题目都是4选1客观选择题（type: "mcq"）。可参考片段：{retrieval_snippets}。
 
 重要：每题包含稳定的 metadata（自由文本用英文）。避开高频 metadata：{avoid_metadata}。
+数学硬性规则：不要复用 avoid_metadata 里已有的 type+nums（例如不要反复出 299+501），每题换新数字；不同知识点也禁止共用同一套数字。
 历史质量反馈（用于改进出题；不要照抄原题）：{feedback_context}
 - few_shot_good：同知识点的高分例题
 - avoid_patterns：已知失败模式，需避免
 - prompt_patches：来自历史评审的额外出题规则，视为硬性约束
+- user_reports：家长/学生对错答案、错解析或差题的反馈——据此纠正同类错误，不要重复被投诉的问题
 知识点列表：{knowledge_points}
 分配计划 knowledge_point_ids_plan：{knowledge_point_ids_plan}
 

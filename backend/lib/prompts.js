@@ -36,13 +36,16 @@ IMPORTANT (feature extraction / metadata):
 - For NON-math questions, metadata can be any stable JSON object (fields may differ by subject).
 - For vocabulary-style questions, prefer this stable shape (all free-text values in English):
         {"type":"vocabulary","word":"apple","context":"fruit"}
-- Avoid generating questions that are similar to these frequent metadata patterns for this student: {{avoid_metadata}}.
+- Avoid generating questions that are similar to these frequent metadata patterns (student history + question bank). Treat matching type+nums as forbidden: {{avoid_metadata}}.
+- HARD RULE for MATH: never reuse the same metadata.type + metadata.nums pair that appears in avoid_metadata (e.g. do not keep generating 299+501). Pick fresh numbers for every question.
+- Different knowledge_point_ids must still use different nums/contexts — do not recycle one arithmetic template across many knowledge points.
 - If the same story template repeats, vary the numbers; avoid repeatedly using the same type/nums/result.
 
 Past diagnostic quality feedback (learn from this; do NOT copy questions verbatim): {{feedback_context}}
 - few_shot_good: high-scoring example questions for similar knowledge points
 - avoid_patterns: known failure patterns to avoid
 - prompt_patches: extra authoring rules from prior reviews
+- user_reports: parent/student reports about bad answers/explanations or weak items — fix those failure modes; do not repeat the reported mistake
 
 Knowledge points are pre-seeded (do NOT invent new ones): {{knowledge_points}}.
 You are also given a required knowledge point assignment plan for each question index: {{knowledge_point_ids_plan}}.
@@ -65,13 +68,16 @@ The plan is an array of integers with length {{num_questions}}. For question i (
 - 非数学题的 metadata 可以是任意稳定的 JSON 对象（不同学科字段可以不一样）。
 - 如果是“词汇/概念类”题目，建议使用这种稳定形状（自由文本全英文）：
         {"type":"vocabulary","word":"apple","context":"fruit"}
-- 需要避开与该学生“高频出现的 metadata 模式”相似的题目：{{avoid_metadata}}。
+- 需要避开这些高频 metadata 模式（含学生历史与题库全局）。type+nums 相同视为禁止：{{avoid_metadata}}。
+- 数学题硬性规则：不要复用 avoid_metadata 里已出现的 metadata.type + metadata.nums（例如不要反复出 299+501），每题换新数字。
+- 不同 knowledge_point_id 也必须换数字/情境，禁止把同一套口算例题套到多个知识点。
 - 如果题型/情境很相似，请主动换数字，避免总是同一个 type/nums/结果。
 
 历史诊断质量反馈（用于改进出题；不要照抄原题）：{{feedback_context}}
 - few_shot_good：同知识点的高分例题
 - avoid_patterns：已知失败模式，需避免
 - prompt_patches：来自历史评审的额外出题规则
+- user_reports：家长/学生对错答案、错解析或差题的反馈——据此纠正同类错误，不要重复被投诉的问题
 
 知识点是预先存入数据库的输入列表（不要自造新的知识点）：{{knowledge_points}}。
 同时你会拿到一个“每道题对应知识点”的分配计划：{{knowledge_point_ids_plan}}。
@@ -82,7 +88,7 @@ The plan is an array of integers with length {{num_questions}}. For question i (
         lesson: { title: 'string', explanation: 'string', images: ['url'] },
         questions: [{ id: 'string', type: 'mcq|short', prompt: 'string', options: ['string'], answer: 'string', explanation: 'string', knowledge_point_id: 123 }]
     },
-    settings: { model: 'gpt-4.1-mini', temperature: 0.2, max_tokens: 1500 }
+    settings: { model: 'gpt-4.1-mini', temperature: 0.55, max_tokens: 1500 }
 };
 
 const analysis = {
