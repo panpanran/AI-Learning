@@ -1,11 +1,15 @@
 'use strict';
 
 /**
- * FS-20260907-user-feedback-phase2
- * Triage parent/student feedback: propose fixes; auto-apply only when math-verifiable.
+ * FS-20260907-user-feedback-phase2 + FS-20260907-feedback-ai-apply-cae
+ * Triage parent/student feedback: AI may fix content / answer / explanation only.
  */
 
 const AUTO_APPLY = String(process.env.USER_FEEDBACK_AUTO_APPLY ?? '1').trim() !== '0';
+const APPLY_MIN_CONFIDENCE = Math.min(
+    1,
+    Math.max(0, Number(process.env.USER_FEEDBACK_APPLY_MIN_CONFIDENCE) || 0.75)
+);
 
 let triageChain = Promise.resolve();
 
@@ -146,14 +150,16 @@ async function llmProposeFix({ aiClient, createChatCompletionJson, question, fee
     const completion = await createChatCompletionJson(aiClient, {
         model,
         temperature: 0,
-        max_tokens: 900,
+        max_tokens: 1200,
         messages: [
             {
                 role: 'system',
                 content:
                     'You triage parent feedback on a multiple-choice question. Return strict JSON only. '
-                    + 'Decide if the bank answer/explanation is wrong. Prefer minimal edits. '
-                    + 'If the question content is fine and feedback is about student difficulty, set dismiss=true.',
+                    + 'You may fix ONLY these fields: question stem (content), correct answer, and explanation '
+                    + '(both Chinese and English). Do NOT invent new options, change option lists, KP, or metadata. '
+                    + 'If the correct answer changes, it MUST be exactly one of the existing options. '
+                    + 'If feedback is about student difficulty (not a content bug), set dismiss=true.',
             },
             {
                 role: 'user',
@@ -166,14 +172,16 @@ async function llmProposeFix({ aiClient, createChatCompletionJson, question, fee
                     + '  "reason": "short English reason",\n'
                     + '  "confidence": 0.0-1.0,\n'
                     + '  "proposed_fix": {\n'
+                    + '     "content_cn": string|null,\n'
+                    + '     "content_en": string|null,\n'
                     + '     "answer_cn": string|null,\n'
                     + '     "answer_en": string|null,\n'
                     + '     "explanation_cn": string|null,\n'
                     + '     "explanation_en": string|null\n'
                     + '  }|null\n'
                     + '}\n'
-                    + 'Rules: proposed answers must match one of the existing options when options exist. '
-                    + 'If unsure, set proposed_fix null and dismiss false.',
+                    + 'Only include fields that should change. Omit or null fields that stay the same. '
+                    + 'If unsure, set proposed_fix null and dismiss false with lower confidence.',
             },
         ],
     });
@@ -183,6 +191,69 @@ async function llmProposeFix({ aiClient, createChatCompletionJson, question, fee
         ? completion.choices[0].message.content
         : '';
     return safeParseJsonObject(text);
+}
+
+function normalizeOptionsObject(options) {
+    if (!options) return null;
+    if (typeof options === 'string') {
+        try { return JSON.parse(options); } catch { return null; }
+    }
+    return options;
+}
+
+function proposedAnswersConsistentWithOptions(question, proposed) {
+    if (!proposed) return false;
+    const opts = normalizeOptionsObject(question.options);
+    const hasAnyAnswer = !!(proposed.answer_cn || proposed.answer_en);
+    if (!hasAnyAnswer) {
+        // content/explanation-only fix is OK
+        return !!(proposed.content_cn || proposed.content_en
+            || proposed.explanation_cn || proposed.explanation_en);
+    }
+    if (!opts) return false;
+
+    if (Array.isArray(opts.zh) && proposed.answer_cn) {
+        if (!findMatchingOption({ zh: opts.zh }, proposed.answer_cn)) return false;
+    }
+    if (Array.isArray(opts.en) && proposed.answer_en) {
+        if (!findMatchingOption({ en: opts.en }, proposed.answer_en)) return false;
+    }
+    if (!Array.isArray(opts.zh) && !Array.isArray(opts.en)) {
+        const a = proposed.answer_cn || proposed.answer_en;
+        if (a && !findMatchingOption(opts, a)) return false;
+    }
+    // If only one language provided, still require it match some option text
+    if (proposed.answer_cn && !Array.isArray(opts.zh) && Array.isArray(opts.en)) {
+        if (!findMatchingOption(opts, proposed.answer_cn)) return false;
+    }
+    if (proposed.answer_en && !Array.isArray(opts.en) && Array.isArray(opts.zh)) {
+        if (!findMatchingOption(opts, proposed.answer_en)) return false;
+    }
+    return true;
+}
+
+function fieldChanged(oldVal, newVal) {
+    if (newVal == null || String(newVal).trim() === '') return false;
+    return String(oldVal || '').trim() !== String(newVal).trim();
+}
+
+function hasCaeChange(question, proposed) {
+    if (!proposed) return false;
+    return fieldChanged(question.content_cn, proposed.content_cn)
+        || fieldChanged(question.content_en, proposed.content_en)
+        || fieldChanged(question.answer_cn, proposed.answer_cn)
+        || fieldChanged(question.answer_en, proposed.answer_en)
+        || fieldChanged(question.explanation_cn, proposed.explanation_cn)
+        || fieldChanged(question.explanation_en, proposed.explanation_en);
+}
+
+function canAutoApplyLlm(question, proposed, confidence) {
+    if (!AUTO_APPLY || !proposed) return false;
+    const conf = Number(confidence);
+    if (!Number.isFinite(conf) || conf < APPLY_MIN_CONFIDENCE) return false;
+    if (!proposedAnswersConsistentWithOptions(question, proposed)) return false;
+    if (!hasCaeChange(question, proposed)) return false;
+    return true;
 }
 
 function buildMathProposedFix(question, expected) {
@@ -245,6 +316,8 @@ async function applyProposedFix(pool, questionId, proposed) {
         params.push(String(val));
         fields.push(`${col} = $${params.length}`);
     };
+    setIf('content_cn', proposed.content_cn);
+    setIf('content_en', proposed.content_en);
     setIf('answer_cn', proposed.answer_cn);
     setIf('answer_en', proposed.answer_en);
     setIf('explanation_cn', proposed.explanation_cn);
@@ -335,10 +408,17 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
                 source: 'llm',
             };
         } else if (proposed && llm.proposed_fix) {
-            // Keep math answers; allow LLM explanations if present
-            if (llm.proposed_fix.explanation_cn) proposed.explanation_cn = llm.proposed_fix.explanation_cn;
-            if (llm.proposed_fix.explanation_en) proposed.explanation_en = llm.proposed_fix.explanation_en;
+            // Keep math-verified answers; allow LLM content + explanations
+            const pf = llm.proposed_fix;
+            if (pf.content_cn) proposed.content_cn = pf.content_cn;
+            if (pf.content_en) proposed.content_en = pf.content_en;
+            if (pf.explanation_cn) proposed.explanation_cn = pf.explanation_cn;
+            if (pf.explanation_en) proposed.explanation_en = pf.explanation_en;
             if (llm.reason) proposed.reason = `${proposed.reason || ''}; ${llm.reason}`.trim();
+            if (llm.confidence != null && proposed.confidence == null) {
+                proposed.confidence = Number(llm.confidence);
+            }
+            proposed.source = proposed.source || 'math_verify+llm';
         } else if (!proposed && llm.reason) {
             proposed = { reason: llm.reason, confidence: llm.confidence, source: 'llm' };
         }
@@ -357,28 +437,51 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
     }
 
     const mathApplicable = expected && canAutoApplyMath(question, proposed);
-    const shouldApply = AUTO_APPLY && mathApplicable && proposed
-        && (proposed.answer_cn || proposed.answer_en || proposed.explanation_cn || proposed.explanation_en);
+    const llmConfidence = proposed && proposed.confidence != null
+        ? Number(proposed.confidence)
+        : (llm && llm.confidence != null ? Number(llm.confidence) : null);
+    const llmApplicable = canAutoApplyLlm(question, proposed, llmConfidence);
+    const shouldApply = AUTO_APPLY && proposed && (mathApplicable || llmApplicable)
+        && (proposed.content_cn || proposed.content_en
+            || proposed.answer_cn || proposed.answer_en
+            || proposed.explanation_cn || proposed.explanation_en);
 
     if (shouldApply) {
-        // Normalize answers to option text
-        if (expected) {
-            const opt = findMatchingOption(question.options, expected);
-            if (opt) {
-                proposed.answer_cn = proposed.answer_cn || opt;
-                proposed.answer_en = proposed.answer_en || opt;
-                // If bilingual options differ, keep both when possible
-                const zhList = question.options && question.options.zh;
-                const enList = question.options && question.options.en;
-                if (Array.isArray(zhList)) {
-                    const z = zhList.find((t) => answersMatch(t, expected));
-                    if (z) proposed.answer_cn = z;
-                }
-                if (Array.isArray(enList)) {
-                    const e = enList.find((t) => answersMatch(t, expected));
-                    if (e) proposed.answer_en = e;
+        // Normalize math answers to option text
+        if (expected && mathApplicable) {
+            const zhList = question.options && question.options.zh;
+            const enList = question.options && question.options.en;
+            if (Array.isArray(zhList)) {
+                const z = zhList.find((t) => answersMatch(t, expected));
+                if (z) proposed.answer_cn = z;
+            }
+            if (Array.isArray(enList)) {
+                const e = enList.find((t) => answersMatch(t, expected));
+                if (e) proposed.answer_en = e;
+            }
+            if (!proposed.answer_cn || !proposed.answer_en) {
+                const opt = findMatchingOption(question.options, expected);
+                if (opt) {
+                    proposed.answer_cn = proposed.answer_cn || opt;
+                    proposed.answer_en = proposed.answer_en || opt;
                 }
             }
+        }
+
+        // Snap LLM answers to exact option strings when close match
+        if (proposed.answer_cn) {
+            const z = findMatchingOption(
+                (question.options && question.options.zh) ? { zh: question.options.zh } : question.options,
+                proposed.answer_cn
+            );
+            if (z) proposed.answer_cn = z;
+        }
+        if (proposed.answer_en) {
+            const e = findMatchingOption(
+                (question.options && question.options.en) ? { en: question.options.en } : question.options,
+                proposed.answer_en
+            );
+            if (e) proposed.answer_en = e;
         }
 
         await applyProposedFix(pool, question.id, proposed);
@@ -389,9 +492,20 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
                  proposed_fix = $3::jsonb,
                  applied_at = NOW()
              WHERE id = $1`,
-            [id, category, JSON.stringify({ ...proposed, auto_applicable: true })]
+            [id, category, JSON.stringify({
+                ...proposed,
+                auto_applicable: true,
+                apply_via: mathApplicable ? 'math_or_llm' : 'llm',
+                confidence: llmConfidence,
+            })]
         );
-        console.log('[user-feedback-triage] applied', { feedback_id: id, question_id: question.id, category });
+        console.log('[user-feedback-triage] applied', {
+            feedback_id: id,
+            question_id: question.id,
+            category,
+            via: mathApplicable ? 'math' : 'llm',
+            confidence: llmConfidence,
+        });
         return { ok: true, status: 'applied', category, proposed };
     }
 
@@ -417,14 +531,15 @@ function queueUserFeedbackTriage(opts) {
         });
 }
 
-async function triageOpenUserFeedback(pool, deps = {}, { limit = 50 } = {}) {
+async function triageOpenUserFeedback(pool, deps = {}, { limit = 50, includeAcknowledged = false } = {}) {
     const lim = Math.max(1, Math.min(200, Number(limit) || 50));
+    const statuses = includeAcknowledged ? ['open', 'acknowledged'] : ['open'];
     const r = await pool.query(
         `SELECT id FROM user_question_feedback
-         WHERE status = 'open'
+         WHERE status = ANY($1::text[])
          ORDER BY created_at ASC
-         LIMIT $1`,
-        [lim]
+         LIMIT $2`,
+        [statuses, lim]
     );
     const results = [];
     for (const row of r.rows) {
@@ -439,9 +554,13 @@ module.exports = {
     answersMatch,
     computeMathResult,
     canAutoApplyMath,
+    canAutoApplyLlm,
+    proposedAnswersConsistentWithOptions,
+    hasCaeChange,
     buildMathProposedFix,
     triageUserFeedbackById,
     queueUserFeedbackTriage,
     triageOpenUserFeedback,
     AUTO_APPLY,
+    APPLY_MIN_CONFIDENCE,
 };

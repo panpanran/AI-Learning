@@ -5,6 +5,7 @@
   Usage (from backend/):
     node scripts/triage_open_user_feedback.js
     node scripts/triage_open_user_feedback.js --limit 20
+    node scripts/triage_open_user_feedback.js --include-acknowledged
 */
 
 'use strict';
@@ -34,6 +35,7 @@ async function createChatCompletionJson(aiClient, params) {
 async function main() {
     const limitArg = process.argv.indexOf('--limit');
     const limit = limitArg >= 0 ? Number(process.argv[limitArg + 1]) : 50;
+    const includeAcknowledged = process.argv.includes('--include-acknowledged');
     const cs = process.env.DATABASE_URL || process.env.PG_CONNECTION_STRING;
     if (!cs) {
         console.error('Missing DATABASE_URL');
@@ -53,14 +55,17 @@ async function main() {
         const results = await triageOpenUserFeedback(pool, {
             aiClient,
             createChatCompletionJson,
-        }, { limit: Number.isFinite(limit) ? limit : 50 });
+        }, {
+            limit: Number.isFinite(limit) ? limit : 50,
+            includeAcknowledged,
+        });
 
         const counts = {};
         for (const r of results) {
             const k = (r && r.status) || (r && r.error) || 'unknown';
             counts[k] = (counts[k] || 0) + 1;
         }
-        console.log('triaged', results.length, counts);
+        console.log('triaged', results.length, { includeAcknowledged, ...counts });
     } finally {
         await pool.end().catch(() => {});
     }

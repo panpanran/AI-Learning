@@ -4,6 +4,8 @@ const {
     computeMathResult,
     answersMatch,
     canAutoApplyMath,
+    canAutoApplyLlm,
+    proposedAnswersConsistentWithOptions,
     buildMathProposedFix,
 } = require('../lib/userFeedbackTriage');
 
@@ -40,5 +42,41 @@ describe('userFeedbackTriage math helpers', () => {
         };
         const proposed = buildMathProposedFix(question, '800');
         expect(canAutoApplyMath(question, proposed)).toBe(false);
+    });
+});
+
+describe('userFeedbackTriage LLM CAE apply gates', () => {
+    const question = {
+        content_cn: '旧题干',
+        content_en: 'old stem',
+        answer_cn: 'A',
+        answer_en: 'A',
+        explanation_cn: '旧解析',
+        explanation_en: 'old expl',
+        options: { zh: ['A', 'B', 'C', 'D'], en: ['A', 'B', 'C', 'D'] },
+    };
+
+    it('allows high-confidence content/answer/explanation fix in options', () => {
+        const proposed = {
+            content_cn: '新题干',
+            content_en: 'new stem',
+            answer_cn: 'B',
+            answer_en: 'B',
+            explanation_cn: '新解析',
+            explanation_en: 'new expl',
+        };
+        expect(proposedAnswersConsistentWithOptions(question, proposed)).toBe(true);
+        expect(canAutoApplyLlm(question, proposed, 0.9)).toBe(true);
+    });
+
+    it('rejects answer not in options', () => {
+        const proposed = { answer_cn: 'Z', answer_en: 'Z' };
+        expect(proposedAnswersConsistentWithOptions(question, proposed)).toBe(false);
+        expect(canAutoApplyLlm(question, proposed, 0.99)).toBe(false);
+    });
+
+    it('rejects low confidence', () => {
+        const proposed = { explanation_cn: '更好的解析', explanation_en: 'better' };
+        expect(canAutoApplyLlm(question, proposed, 0.4)).toBe(false);
     });
 });
