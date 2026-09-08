@@ -29,7 +29,7 @@ function buildAppVersion(date = new Date()) {
  * deep links 404. Copying index.html into each client route folder makes
  * `/app/`, `/history/`, … real files the CDN can serve (SPA still boots).
  */
-function spaRouteHtmlPlugin(routes = ['app', 'history', 'scores', 'results', 'login', 'mistakes', 'all-correct']) {
+function spaRouteHtmlPlugin(routes = ['app', 'history', 'scores', 'results', 'feedback', 'login', 'mistakes', 'all-correct']) {
     return {
         name: 'spa-route-html',
         apply: 'build',

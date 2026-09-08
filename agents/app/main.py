@@ -3,9 +3,17 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from app.config import load_env
-from app.models import DiagnosticRunRequest, DiagnosticRunResponse, QualityRunRequest, QualityRunResponse
+from app.models import (
+    DiagnosticRunRequest,
+    DiagnosticRunResponse,
+    FeedbackTriageRequest,
+    FeedbackTriageResponse,
+    QualityRunRequest,
+    QualityRunResponse,
+)
 from app.orchestrators.diagnostic import run_diagnostic_quality
 from app.orchestrators.diagnostic_run import run_diagnostic_run
+from app.orchestrators.feedback_triage import run_feedback_triage
 
 load_env()
 
@@ -25,3 +33,8 @@ def diagnostic_quality_run(request: QualityRunRequest):
 @app.post("/v1/diagnostic/run", response_model=DiagnosticRunResponse)
 def diagnostic_run(request: DiagnosticRunRequest):
     return run_diagnostic_run(request)
+
+
+@app.post("/v1/feedback/triage", response_model=FeedbackTriageResponse)
+def feedback_triage(request: FeedbackTriageRequest):
+    return run_feedback_triage(request)

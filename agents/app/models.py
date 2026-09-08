@@ -68,3 +68,41 @@ class DiagnosticRunResponse(BaseModel):
     refine_rounds: int = 0
     dedupe_rejected: int = 0
     persisted_ids: list[int | None] = Field(default_factory=list)
+
+
+class FeedbackTriageItemIn(BaseModel):
+    feedback_id: int | None = None
+    question_id: int | None = None
+    category: str = "other"
+    comment: str = ""
+    given_answer: str | None = None
+    question: dict[str, Any] = Field(default_factory=dict)
+
+
+class FeedbackTriageItemResult(BaseModel):
+    feedback_id: int | None = None
+    question_id: int | None = None
+    status: str
+    category: str = "other"
+    proposed_fix: dict[str, Any] | None = None
+    decision: str = ""
+    apply: bool = False
+
+
+class FeedbackTriageRequest(BaseModel):
+    items: list[FeedbackTriageItemIn] = Field(default_factory=list)
+    feedback_id: int | None = None
+    feedback_ids: list[int] = Field(default_factory=list)
+    auto_apply: bool = True
+    min_confidence: float = 0.75
+    skip_llm: bool = False
+    meta: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "workflow"
+
+
+class FeedbackTriageResponse(BaseModel):
+    batch_id: str = ""
+    status: str = "ok"
+    message: str = ""
+    items: list[FeedbackTriageItemResult] = Field(default_factory=list)
+    feedback_ids: list[int] = Field(default_factory=list)

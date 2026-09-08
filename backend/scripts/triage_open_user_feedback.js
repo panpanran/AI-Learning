@@ -1,6 +1,6 @@
 /*
   Backfill triage for open user_question_feedback rows.
-  FS-20260907-user-feedback-phase2
+  Prefers agents LangGraph batch when AGENTS_SERVICE_URL + AGENTS_FEEDBACK_TRIAGE.
 
   Usage (from backend/):
     node scripts/triage_open_user_feedback.js

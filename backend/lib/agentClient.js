@@ -16,6 +16,12 @@ function isAgentsDiagnosticRunEnabled() {
     return isAgentsServiceEnabled() && String(process.env.AGENTS_DIAGNOSTIC_RUN ?? '0').trim() !== '0';
 }
 
+function isAgentsFeedbackTriageEnabled() {
+    // Default ON when agents URL is configured (same deploy surface as diagnostic).
+    if (!isAgentsServiceEnabled()) return false;
+    return String(process.env.AGENTS_FEEDBACK_TRIAGE ?? '1').trim() !== '0';
+}
+
 async function agentsFetch(path, body, timeoutMs) {
     const baseUrl = getAgentsServiceUrl();
     const controller = new AbortController();
@@ -131,9 +137,48 @@ async function runAgentsDiagnosticRun({
     return result;
 }
 
+/**
+ * FS-20260907-agents-feedback-triage-workflow
+ * Batch parent-feedback triage on agents LangGraph (propose → gate).
+ */
+async function runAgentsFeedbackTriage({
+    items,
+    autoApply,
+    minConfidence,
+    skipLlm,
+    meta,
+}) {
+    if (!isAgentsFeedbackTriageEnabled()) return null;
+
+    const list = Array.isArray(items) ? items.slice(0, 20) : [];
+    if (!list.length) return null;
+
+    const result = await agentsFetch('/v1/feedback/triage', {
+        items: list,
+        auto_apply: autoApply !== false,
+        min_confidence: minConfidence != null ? Number(minConfidence) : undefined,
+        skip_llm: Boolean(skipLlm),
+        meta: meta || {},
+        mode: 'workflow',
+    }, Number(process.env.AGENTS_FEEDBACK_TIMEOUT_MS)
+        || Number(process.env.AGENTS_SERVICE_TIMEOUT_MS)
+        || 300000);
+
+    return {
+        batch_id: result && result.batch_id,
+        status: (result && result.status) || 'ok',
+        message: (result && result.message) || '',
+        items: (result && Array.isArray(result.items)) ? result.items : [],
+        feedback_ids: (result && result.feedback_ids) || [],
+        source: 'agents-service',
+    };
+}
+
 module.exports = {
     isAgentsServiceEnabled,
     isAgentsDiagnosticRunEnabled,
+    isAgentsFeedbackTriageEnabled,
     runAgentsQualityAudit,
     runAgentsDiagnosticRun,
+    runAgentsFeedbackTriage,
 };

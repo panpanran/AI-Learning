@@ -48,6 +48,19 @@ export default function MenuBar({ active, onChange }: { active: MenuKey, onChang
                     <path d="M19 20V14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                 </svg>
             </button>
+
+            <button
+                type="button"
+                className={'menu-icon-btn'}
+                onClick={() => navigate('/feedback')}
+                aria-label={t('feedback_review')}
+                title={t('feedback_review')}
+            >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M4 5h16v11H8l-4 3V5Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    <path d="M8 9h8M8 12h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+            </button>
         </div>
     )
 }

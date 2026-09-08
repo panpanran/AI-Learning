@@ -332,30 +332,320 @@ async function applyProposedFix(pool, questionId, proposed) {
 }
 
 /**
+ * Human decision on a triage proposal.
+ * action: accept | reject
+ */
+async function decideUserFeedback(pool, {
+    feedbackId,
+    userIds,
+    action,
+}) {
+    const id = Number(feedbackId);
+    const act = String(action || '').toLowerCase();
+    if (!pool || !Number.isInteger(id) || !['accept', 'reject'].includes(act)) {
+        const err = new Error('feedback_id and action (accept|reject) required');
+        err.status = 400;
+        throw err;
+    }
+    const ids = (Array.isArray(userIds) ? userIds : [])
+        .map((x) => Number(x))
+        .filter(Number.isInteger);
+    if (!ids.length) {
+        const err = new Error('Unauthorized');
+        err.status = 401;
+        throw err;
+    }
+
+    const fbRes = await pool.query(
+        `SELECT * FROM user_question_feedback WHERE id = $1 AND user_id = ANY($2::int[]) LIMIT 1`,
+        [id, ids]
+    );
+    const feedback = fbRes.rows[0];
+    if (!feedback) {
+        const err = new Error('feedback not found');
+        err.status = 404;
+        throw err;
+    }
+    if (feedback.status === 'applied' || feedback.status === 'dismissed') {
+        return { id, status: feedback.status, skipped: true };
+    }
+
+    if (act === 'reject') {
+        await pool.query(
+            `UPDATE user_question_feedback
+             SET status = 'dismissed',
+                 proposed_fix = COALESCE(proposed_fix, '{}'::jsonb) || $2::jsonb
+             WHERE id = $1`,
+            [id, JSON.stringify({ human_decision: 'reject' })]
+        );
+        return { id, status: 'dismissed' };
+    }
+
+    // accept
+    const proposed = feedback.proposed_fix && typeof feedback.proposed_fix === 'object'
+        ? feedback.proposed_fix
+        : null;
+    const hasCae = proposed && (
+        proposed.content_cn || proposed.content_en
+        || proposed.answer_cn || proposed.answer_en
+        || proposed.explanation_cn || proposed.explanation_en
+    );
+    if (!hasCae) {
+        const err = new Error('No proposed content/answer/explanation to apply. Re-analyze first.');
+        err.status = 400;
+        throw err;
+    }
+
+    const qRes = await pool.query(
+        `SELECT id, options, answer_cn, answer_en, content_cn, content_en,
+                explanation_cn, explanation_en, metadata
+         FROM questions WHERE id = $1 LIMIT 1`,
+        [feedback.question_id]
+    );
+    const question = qRes.rows[0];
+    if (!question) {
+        const err = new Error('question not found');
+        err.status = 404;
+        throw err;
+    }
+
+    // Soft gate: if answers present, prefer option consistency (human override still allowed if no options)
+    if ((proposed.answer_cn || proposed.answer_en) && question.options) {
+        if (!proposedAnswersConsistentWithOptions(question, proposed)) {
+            const err = new Error('Proposed answer is not among existing options');
+            err.status = 400;
+            throw err;
+        }
+    }
+
+    await applyProposedFix(pool, question.id, proposed);
+    await pool.query(
+        `UPDATE user_question_feedback
+         SET status = 'applied',
+             proposed_fix = COALESCE(proposed_fix, '{}'::jsonb) || $2::jsonb,
+             applied_at = NOW()
+         WHERE id = $1`,
+        [id, JSON.stringify({ human_decision: 'accept', applied_by: 'review_ui' })]
+    );
+    return { id, status: 'applied', question_id: question.id };
+}
+
+async function listUserFeedback(pool, {
+    userIds,
+    status = 'acknowledged',
+    limit = 50,
+}) {
+    const ids = (Array.isArray(userIds) ? userIds : [])
+        .map((x) => Number(x))
+        .filter(Number.isInteger);
+    if (!pool || !ids.length) return [];
+
+    const lim = Math.max(1, Math.min(100, Number(limit) || 50));
+    const statuses = String(status || 'acknowledged')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const useStatuses = statuses.length ? statuses : ['acknowledged'];
+
+    const r = await pool.query(
+        `SELECT f.id, f.user_id, f.question_id, f.knowledge_point_id, f.grade_id, f.subject_id,
+                f.category, f.comment, f.given_answer, f.status, f.proposed_fix, f.created_at, f.applied_at,
+                q.content_cn, q.content_en, q.answer_cn, q.answer_en,
+                q.explanation_cn, q.explanation_en, q.options
+         FROM user_question_feedback f
+         LEFT JOIN questions q ON q.id = f.question_id
+         WHERE f.user_id = ANY($1::int[])
+           AND f.status = ANY($2::text[])
+         ORDER BY f.created_at DESC
+         LIMIT $3`,
+        [ids, useStatuses, lim]
+    );
+
+    return (r.rows || []).map((row) => ({
+        id: Number(row.id),
+        user_id: Number(row.user_id),
+        question_id: row.question_id != null ? Number(row.question_id) : null,
+        knowledge_point_id: row.knowledge_point_id != null ? Number(row.knowledge_point_id) : null,
+        grade_id: row.grade_id != null ? Number(row.grade_id) : null,
+        subject_id: row.subject_id != null ? Number(row.subject_id) : null,
+        category: row.category || 'other',
+        comment: row.comment || '',
+        given_answer: row.given_answer || '',
+        status: row.status,
+        proposed_fix: row.proposed_fix || null,
+        created_at: row.created_at,
+        applied_at: row.applied_at,
+        question: {
+            content_cn: row.content_cn || '',
+            content_en: row.content_en || '',
+            answer_cn: row.answer_cn || '',
+            answer_en: row.answer_en || '',
+            explanation_cn: row.explanation_cn || '',
+            explanation_en: row.explanation_en || '',
+            options: row.options || null,
+        },
+    }));
+}
+
+/**
  * Triage one feedback row by id.
+ * Prefers agents LangGraph workflow when enabled; falls back to local Express path.
  */
 async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
     const id = Number(feedbackId);
     if (!pool || !Number.isInteger(id)) return { ok: false, error: 'bad_id' };
 
-    const fbRes = await pool.query(
-        `SELECT * FROM user_question_feedback WHERE id = $1 LIMIT 1`,
-        [id]
-    );
-    const feedback = fbRes.rows[0];
-    if (!feedback) return { ok: false, error: 'not_found' };
-    if (feedback.status === 'applied' || feedback.status === 'dismissed') {
-        return { ok: true, skipped: true, status: feedback.status };
+    const loaded = await loadFeedbackItemsForTriage(pool, [id]);
+    if (!loaded.length) {
+        const fbRes = await pool.query(
+            `SELECT id, status FROM user_question_feedback WHERE id = $1 LIMIT 1`,
+            [id]
+        );
+        if (!fbRes.rows[0]) return { ok: false, error: 'not_found' };
+        return { ok: true, skipped: true, status: fbRes.rows[0].status };
     }
 
-    const qRes = await pool.query(
-        `SELECT id, content_cn, content_en, options, metadata,
-                answer_cn, answer_en, explanation_cn, explanation_en,
-                knowledge_point_id, grade_id, subject_id
-         FROM questions WHERE id = $1 LIMIT 1`,
-        [feedback.question_id]
+    // Agents-first (FS-20260907-agents-feedback-triage-workflow)
+    try {
+        const { isAgentsFeedbackTriageEnabled, runAgentsFeedbackTriage } = require('./agentClient');
+        if (isAgentsFeedbackTriageEnabled()) {
+            const agentsResult = await runAgentsFeedbackTriage({
+                items: loaded,
+                autoApply: AUTO_APPLY,
+                minConfidence: APPLY_MIN_CONFIDENCE,
+                meta: { source: 'express_single', feedback_id: id },
+            });
+            if (agentsResult && Array.isArray(agentsResult.items) && agentsResult.items.length) {
+                const applied = await applyAgentsTriageResults(pool, agentsResult.items);
+                const one = applied[0] || { ok: true, status: agentsResult.items[0].status };
+                return {
+                    ok: true,
+                    ...one,
+                    source: 'agents-service',
+                    batch_id: agentsResult.batch_id,
+                };
+            }
+        }
+    } catch (err) {
+        console.error(
+            '[user-feedback-triage] agents failed, falling back to Express:',
+            err && err.message ? err.message : err
+        );
+    }
+
+    return triageUserFeedbackLocally(pool, loaded[0], deps);
+}
+
+async function loadFeedbackItemsForTriage(pool, feedbackIds) {
+    const ids = (Array.isArray(feedbackIds) ? feedbackIds : [])
+        .map((x) => Number(x))
+        .filter(Number.isInteger);
+    if (!pool || !ids.length) return [];
+
+    const r = await pool.query(
+        `SELECT f.id AS feedback_id, f.question_id, f.category, f.comment, f.given_answer, f.status,
+                q.id AS q_id, q.content_cn, q.content_en, q.options, q.metadata,
+                q.answer_cn, q.answer_en, q.explanation_cn, q.explanation_en,
+                q.knowledge_point_id, q.grade_id, q.subject_id
+         FROM user_question_feedback f
+         LEFT JOIN questions q ON q.id = f.question_id
+         WHERE f.id = ANY($1::int[])
+           AND f.status NOT IN ('applied', 'dismissed')`,
+        [ids]
     );
-    const question = qRes.rows[0];
+
+    return (r.rows || []).map((row) => ({
+        feedback_id: Number(row.feedback_id),
+        question_id: row.question_id != null ? Number(row.question_id) : null,
+        category: row.category || 'other',
+        comment: row.comment || '',
+        given_answer: row.given_answer || '',
+        question: row.q_id == null ? null : {
+            id: Number(row.q_id),
+            content_cn: row.content_cn,
+            content_en: row.content_en,
+            options: row.options,
+            metadata: row.metadata,
+            answer_cn: row.answer_cn,
+            answer_en: row.answer_en,
+            explanation_cn: row.explanation_cn,
+            explanation_en: row.explanation_en,
+            knowledge_point_id: row.knowledge_point_id,
+            grade_id: row.grade_id,
+            subject_id: row.subject_id,
+        },
+    })).filter((item) => item.question);
+}
+
+async function applyAgentsTriageResults(pool, items) {
+    const out = [];
+    for (const row of (items || [])) {
+        const id = Number(row.feedback_id);
+        if (!Number.isInteger(id)) continue;
+        const status = String(row.status || 'acknowledged');
+        const category = String(row.category || 'other').slice(0, 64);
+        const proposed = row.proposed_fix && typeof row.proposed_fix === 'object'
+            ? row.proposed_fix
+            : { reason: 'agents_empty' };
+        const questionId = row.question_id != null ? Number(row.question_id) : null;
+
+        if (status === 'applied' && row.apply !== false && questionId) {
+            const hasCae = proposed.content_cn || proposed.content_en
+                || proposed.answer_cn || proposed.answer_en
+                || proposed.explanation_cn || proposed.explanation_en;
+            if (hasCae) {
+                await applyProposedFix(pool, questionId, proposed);
+                await pool.query(
+                    `UPDATE user_question_feedback
+                     SET status = 'applied',
+                         category = $2,
+                         proposed_fix = $3::jsonb,
+                         applied_at = NOW()
+                     WHERE id = $1`,
+                    [id, category, JSON.stringify(proposed)]
+                );
+                out.push({ ok: true, id, status: 'applied', category, proposed });
+                continue;
+            }
+        }
+
+        if (status === 'dismissed') {
+            await pool.query(
+                `UPDATE user_question_feedback
+                 SET status = 'dismissed',
+                     category = $2,
+                     proposed_fix = $3::jsonb
+                 WHERE id = $1`,
+                [id, category, JSON.stringify(proposed)]
+            );
+            out.push({ ok: true, id, status: 'dismissed', category });
+            continue;
+        }
+
+        await pool.query(
+            `UPDATE user_question_feedback
+             SET status = 'acknowledged',
+                 category = $2,
+                 proposed_fix = $3::jsonb
+             WHERE id = $1`,
+            [id, category, JSON.stringify(proposed)]
+        );
+        out.push({ ok: true, id, status: 'acknowledged', category, proposed });
+    }
+    return out;
+}
+
+/**
+ * Local Express triage (fallback when agents off/unreachable).
+ */
+async function triageUserFeedbackLocally(pool, item, deps = {}) {
+    const id = Number(item.feedback_id);
+    const feedback = {
+        comment: item.comment,
+        category: item.category,
+        given_answer: item.given_answer,
+    };
+    const question = item.question;
     if (!question) {
         await pool.query(
             `UPDATE user_question_feedback
@@ -365,7 +655,7 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
              WHERE id = $1`,
             [id, JSON.stringify({ reason: 'question_missing', confidence: 1 })]
         );
-        return { ok: true, status: 'dismissed', reason: 'question_missing' };
+        return { ok: true, status: 'dismissed', reason: 'question_missing', source: 'express' };
     }
 
     // Prefer deterministic math path first
@@ -384,7 +674,6 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
         }
     }
 
-    // LLM for explanation / classification / non-math (or to refine explanation when math answer wrong)
     try {
         llm = await llmProposeFix({
             aiClient: deps.aiClient || null,
@@ -408,7 +697,6 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
                 source: 'llm',
             };
         } else if (proposed && llm.proposed_fix) {
-            // Keep math-verified answers; allow LLM content + explanations
             const pf = llm.proposed_fix;
             if (pf.content_cn) proposed.content_cn = pf.content_cn;
             if (pf.content_en) proposed.content_en = pf.content_en;
@@ -433,7 +721,7 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
              WHERE id = $1`,
             [id, category, JSON.stringify(proposed || { reason: llm && llm.reason, dismiss: true })]
         );
-        return { ok: true, status: 'dismissed', category };
+        return { ok: true, status: 'dismissed', category, source: 'express' };
     }
 
     const mathApplicable = expected && canAutoApplyMath(question, proposed);
@@ -447,7 +735,6 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
             || proposed.explanation_cn || proposed.explanation_en);
 
     if (shouldApply) {
-        // Normalize math answers to option text
         if (expected && mathApplicable) {
             const zhList = question.options && question.options.zh;
             const enList = question.options && question.options.en;
@@ -468,7 +755,6 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
             }
         }
 
-        // Snap LLM answers to exact option strings when close match
         if (proposed.answer_cn) {
             const z = findMatchingOption(
                 (question.options && question.options.zh) ? { zh: question.options.zh } : question.options,
@@ -505,8 +791,9 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
             category,
             via: mathApplicable ? 'math' : 'llm',
             confidence: llmConfidence,
+            source: 'express',
         });
-        return { ok: true, status: 'applied', category, proposed };
+        return { ok: true, status: 'applied', category, proposed, source: 'express' };
     }
 
     await pool.query(
@@ -517,7 +804,7 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
          WHERE id = $1`,
         [id, category, JSON.stringify(proposed || { reason: 'needs_human_review' })]
     );
-    return { ok: true, status: 'acknowledged', category, proposed };
+    return { ok: true, status: 'acknowledged', category, proposed, source: 'express' };
 }
 
 function queueUserFeedbackTriage(opts) {
@@ -531,6 +818,9 @@ function queueUserFeedbackTriage(opts) {
         });
 }
 
+/**
+ * Batch triage open/acknowledged rows — one agents call when enabled.
+ */
 async function triageOpenUserFeedback(pool, deps = {}, { limit = 50, includeAcknowledged = false } = {}) {
     const lim = Math.max(1, Math.min(200, Number(limit) || 50));
     const statuses = includeAcknowledged ? ['open', 'acknowledged'] : ['open'];
@@ -541,12 +831,119 @@ async function triageOpenUserFeedback(pool, deps = {}, { limit = 50, includeAckn
          LIMIT $2`,
         [statuses, lim]
     );
+    const ids = (r.rows || []).map((row) => Number(row.id)).filter(Number.isInteger);
+    if (!ids.length) return [];
+
+    // Prefer a single agents batch (chunks of 20)
+    try {
+        const { isAgentsFeedbackTriageEnabled, runAgentsFeedbackTriage } = require('./agentClient');
+        if (isAgentsFeedbackTriageEnabled()) {
+            const all = [];
+            for (let i = 0; i < ids.length; i += 20) {
+                const chunk = ids.slice(i, i + 20);
+                const loaded = await loadFeedbackItemsForTriage(pool, chunk);
+                if (!loaded.length) continue;
+                // eslint-disable-next-line no-await-in-loop
+                const agentsResult = await runAgentsFeedbackTriage({
+                    items: loaded,
+                    autoApply: AUTO_APPLY,
+                    minConfidence: APPLY_MIN_CONFIDENCE,
+                    meta: { source: 'express_batch', chunk_start: i },
+                });
+                if (agentsResult && Array.isArray(agentsResult.items)) {
+                    // eslint-disable-next-line no-await-in-loop
+                    const applied = await applyAgentsTriageResults(pool, agentsResult.items);
+                    all.push(...applied.map((x) => ({
+                        ...x,
+                        source: 'agents-service',
+                        batch_id: agentsResult.batch_id,
+                    })));
+                }
+            }
+            if (all.length) return all;
+        }
+    } catch (err) {
+        console.error(
+            '[user-feedback-triage] agents batch failed, falling back:',
+            err && err.message ? err.message : err
+        );
+    }
+
     const results = [];
-    for (const row of r.rows) {
+    for (const id of ids) {
         // eslint-disable-next-line no-await-in-loop
-        results.push(await triageUserFeedbackById(pool, row.id, deps));
+        results.push(await triageUserFeedbackById(pool, id, deps));
     }
     return results;
+}
+
+/**
+ * Batch triage for a set of user ids (review UI / API).
+ */
+async function triageUserFeedbackBatch(pool, deps = {}, {
+    userIds,
+    status = 'open,acknowledged',
+    limit = 20,
+} = {}) {
+    const ids = (Array.isArray(userIds) ? userIds : [])
+        .map((x) => Number(x))
+        .filter(Number.isInteger);
+    if (!pool || !ids.length) return { items: [], results: [] };
+
+    const lim = Math.max(1, Math.min(20, Number(limit) || 20));
+    const statuses = String(status || 'open,acknowledged')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const r = await pool.query(
+        `SELECT id FROM user_question_feedback
+         WHERE user_id = ANY($1::int[])
+           AND status = ANY($2::text[])
+         ORDER BY created_at ASC
+         LIMIT $3`,
+        [ids, statuses.length ? statuses : ['open', 'acknowledged'], lim]
+    );
+    const feedbackIds = (r.rows || []).map((row) => Number(row.id)).filter(Number.isInteger);
+    if (!feedbackIds.length) return { items: [], results: [] };
+
+    const loaded = await loadFeedbackItemsForTriage(pool, feedbackIds);
+    if (!loaded.length) return { items: [], results: [] };
+
+    try {
+        const { isAgentsFeedbackTriageEnabled, runAgentsFeedbackTriage } = require('./agentClient');
+        if (isAgentsFeedbackTriageEnabled()) {
+            const agentsResult = await runAgentsFeedbackTriage({
+                items: loaded,
+                autoApply: AUTO_APPLY,
+                minConfidence: APPLY_MIN_CONFIDENCE,
+                meta: { source: 'express_user_batch' },
+            });
+            if (agentsResult && Array.isArray(agentsResult.items) && agentsResult.items.length) {
+                const applied = await applyAgentsTriageResults(pool, agentsResult.items);
+                return {
+                    items: loaded,
+                    results: applied.map((x) => ({
+                        ...x,
+                        source: 'agents-service',
+                        batch_id: agentsResult.batch_id,
+                    })),
+                    batch_id: agentsResult.batch_id,
+                };
+            }
+        }
+    } catch (err) {
+        console.error(
+            '[user-feedback-triage] user batch agents failed:',
+            err && err.message ? err.message : err
+        );
+    }
+
+    const local = [];
+    for (const item of loaded) {
+        // eslint-disable-next-line no-await-in-loop
+        local.push(await triageUserFeedbackLocally(pool, item, deps));
+    }
+    return { items: loaded, results: local };
 }
 
 module.exports = {
@@ -558,9 +955,15 @@ module.exports = {
     proposedAnswersConsistentWithOptions,
     hasCaeChange,
     buildMathProposedFix,
+    applyProposedFix,
     triageUserFeedbackById,
     queueUserFeedbackTriage,
     triageOpenUserFeedback,
+    triageUserFeedbackBatch,
+    loadFeedbackItemsForTriage,
+    applyAgentsTriageResults,
+    decideUserFeedback,
+    listUserFeedback,
     AUTO_APPLY,
     APPLY_MIN_CONFIDENCE,
 };

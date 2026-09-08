@@ -463,7 +463,7 @@ const {
     ensureUserQuestionFeedbackTable,
     insertUserQuestionFeedback,
 } = require('./lib/feedbackStore');
-const { queueUserFeedbackTriage } = require('./lib/userFeedbackTriage');
+const { queueUserFeedbackTriage, decideUserFeedback, listUserFeedback, triageUserFeedbackById, triageUserFeedbackBatch } = require('./lib/userFeedbackTriage');
 const { registerDiagnosticRoutes, reportDiagnosticQuality } = require('./routes/diagnostic');
 
 // Postgres support (optional).
@@ -4016,6 +4016,177 @@ app.post('/api/user-feedback', async (req, res) => {
         }
         console.error('[user-feedback] insert failed:', e && e.message ? e.message : e);
         return res.status(500).json({ error: 'Failed to save feedback' });
+    }
+});
+
+// List current user's feedback for review UI (default: acknowledged).
+app.get('/api/user-feedback', async (req, res) => {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+    if (!useDb) return res.json({ items: [] });
+
+    try {
+        const token = auth.replace('Bearer ', '');
+        const data = jwt.verify(token, JWT_SECRET);
+        let userIds = [data.id];
+        try {
+            const rUser = await pool.query('SELECT username FROM users WHERE id=$1', [data.id]);
+            const username = (rUser.rows[0] && rUser.rows[0].username) ? String(rUser.rows[0].username) : null;
+            if (username) {
+                const ids = await getUserIdsByUsername(username);
+                if (Array.isArray(ids) && ids.length) userIds = ids;
+            }
+        } catch {
+            userIds = [data.id];
+        }
+
+        const status = req.query && req.query.status != null
+            ? String(req.query.status)
+            : 'acknowledged,open';
+        const limit = req.query && req.query.limit != null ? Number(req.query.limit) : 50;
+        const items = await listUserFeedback(pool, { userIds, status, limit });
+        return res.json({ items });
+    } catch (e) {
+        if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        console.error('[user-feedback] list failed:', e && e.message ? e.message : e);
+        return res.status(500).json({ error: 'Failed to list feedback' });
+    }
+});
+
+// Accept / reject a proposed fix (human approval node).
+app.post('/api/user-feedback/:id/decide', async (req, res) => {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+    if (!useDb) return res.status(503).json({ error: 'Database required' });
+
+    try {
+        const token = auth.replace('Bearer ', '');
+        const data = jwt.verify(token, JWT_SECRET);
+        let userIds = [data.id];
+        try {
+            const rUser = await pool.query('SELECT username FROM users WHERE id=$1', [data.id]);
+            const username = (rUser.rows[0] && rUser.rows[0].username) ? String(rUser.rows[0].username) : null;
+            if (username) {
+                const ids = await getUserIdsByUsername(username);
+                if (Array.isArray(ids) && ids.length) userIds = ids;
+            }
+        } catch {
+            userIds = [data.id];
+        }
+
+        const result = await decideUserFeedback(pool, {
+            feedbackId: req.params.id,
+            userIds,
+            action: req.body && req.body.action,
+        });
+        return res.json({ ok: true, ...result });
+    } catch (e) {
+        const status = e && e.status ? Number(e.status) : 0;
+        if (status === 400 || status === 404) {
+            return res.status(status).json({ error: e.message || 'Bad request' });
+        }
+        if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        console.error('[user-feedback] decide failed:', e && e.message ? e.message : e);
+        return res.status(500).json({ error: 'Failed to decide feedback' });
+    }
+});
+
+// Re-queue AI triage for an open/acknowledged item.
+app.post('/api/user-feedback/:id/reanalyze', async (req, res) => {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+    if (!useDb) return res.status(503).json({ error: 'Database required' });
+
+    try {
+        const token = auth.replace('Bearer ', '');
+        const data = jwt.verify(token, JWT_SECRET);
+        let userIds = [data.id];
+        try {
+            const rUser = await pool.query('SELECT username FROM users WHERE id=$1', [data.id]);
+            const username = (rUser.rows[0] && rUser.rows[0].username) ? String(rUser.rows[0].username) : null;
+            if (username) {
+                const ids = await getUserIdsByUsername(username);
+                if (Array.isArray(ids) && ids.length) userIds = ids;
+            }
+        } catch {
+            userIds = [data.id];
+        }
+
+        const id = Number(req.params.id);
+        const own = await pool.query(
+            `SELECT id, status FROM user_question_feedback
+             WHERE id = $1 AND user_id = ANY($2::int[]) LIMIT 1`,
+            [id, userIds]
+        );
+        if (!own.rows[0]) return res.status(404).json({ error: 'feedback not found' });
+        if (own.rows[0].status === 'applied' || own.rows[0].status === 'dismissed') {
+            return res.status(400).json({ error: 'Already finalized' });
+        }
+
+        await pool.query(
+            `UPDATE user_question_feedback SET status = 'open' WHERE id = $1`,
+            [id]
+        );
+
+        // Run triage soon; await so UI can refresh with new proposal (still bounded by OpenAI).
+        const result = await triageUserFeedbackById(pool, id, {
+            aiClient: getOpenAI(),
+            createChatCompletionJson,
+        });
+        return res.json({ ok: true, triage: result });
+    } catch (e) {
+        if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        console.error('[user-feedback] reanalyze failed:', e && e.message ? e.message : e);
+        return res.status(500).json({ error: 'Failed to reanalyze' });
+    }
+});
+
+// Batch triage current user's open/acknowledged feedback (agents workflow when enabled).
+app.post('/api/user-feedback/triage-batch', async (req, res) => {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+    if (!useDb) return res.status(503).json({ error: 'Database required' });
+
+    try {
+        const token = auth.replace('Bearer ', '');
+        const data = jwt.verify(token, JWT_SECRET);
+        let userIds = [data.id];
+        try {
+            const rUser = await pool.query('SELECT username FROM users WHERE id=$1', [data.id]);
+            const username = (rUser.rows[0] && rUser.rows[0].username) ? String(rUser.rows[0].username) : null;
+            if (username) {
+                const ids = await getUserIdsByUsername(username);
+                if (Array.isArray(ids) && ids.length) userIds = ids;
+            }
+        } catch {
+            userIds = [data.id];
+        }
+
+        const limit = req.body && req.body.limit != null ? Number(req.body.limit) : 20;
+        const status = (req.body && req.body.status) || 'open,acknowledged';
+        const out = await triageUserFeedbackBatch(pool, {
+            aiClient: getOpenAI(),
+            createChatCompletionJson,
+        }, { userIds, status, limit });
+
+        return res.json({
+            ok: true,
+            batch_id: out.batch_id || null,
+            results: out.results || [],
+            count: Array.isArray(out.results) ? out.results.length : 0,
+        });
+    } catch (e) {
+        if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        console.error('[user-feedback] triage-batch failed:', e && e.message ? e.message : e);
+        return res.status(500).json({ error: 'Failed to batch triage' });
     }
 });
 

@@ -12,7 +12,7 @@ API.interceptors.response.use(
                 localStorage.removeItem('user')
             } catch { /* ignore */ }
             const path = window.location.pathname || ''
-            if (path.startsWith('/app') || path.startsWith('/scores') || path.startsWith('/history') || path.startsWith('/results')) {
+            if (path.startsWith('/app') || path.startsWith('/scores') || path.startsWith('/history') || path.startsWith('/results') || path.startsWith('/feedback')) {
                 window.location.replace('/')
             }
         }
