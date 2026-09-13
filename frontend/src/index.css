@@ -226,6 +226,19 @@ body {
     opacity: 0.95
 }
 
+.btn:disabled,
+.btn.primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background: #e5e7eb;
+    color: #6b7280;
+    border-color: #e5e7eb;
+}
+
+.btn.primary:disabled:hover {
+    opacity: 0.45;
+}
+
 .select {
     width: 100%;
     padding: 8px;

@@ -341,35 +341,50 @@ export default function FeedbackReview() {
                                 </div>
 
                                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                                    <button
-                                        type="button"
-                                        className="btn primary"
-                                        disabled={busy || !canAccept}
-                                        onClick={() => decide(item.id, 'accept')}
-                                        title={acceptHint || undefined}
-                                    >
-                                        {t('feedback_review_accept')}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="btn"
-                                        disabled={busy || !pending}
-                                        onClick={() => decide(item.id, 'reject')}
-                                    >
-                                        {t('feedback_review_reject')}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="btn"
-                                        disabled={busy}
-                                        onClick={() => reanalyze(item.id)}
-                                    >
-                                        {t('feedback_review_reanalyze')}
-                                    </button>
+                                    {item.status === 'applied' ? (
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            disabled={busy}
+                                            onClick={() => reanalyze(item.id)}
+                                        >
+                                            {t('feedback_review_reanalyze')}
+                                        </button>
+                                    ) : (
+                                        <>
+                                            <button
+                                                type="button"
+                                                className={canAccept ? 'btn primary' : 'btn'}
+                                                disabled={busy || !canAccept}
+                                                onClick={() => decide(item.id, 'accept')}
+                                                title={acceptHint || undefined}
+                                            >
+                                                {t('feedback_review_accept')}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn"
+                                                disabled={busy || !pending}
+                                                onClick={() => decide(item.id, 'reject')}
+                                            >
+                                                {t('feedback_review_reject')}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="btn"
+                                                disabled={busy}
+                                                onClick={() => reanalyze(item.id)}
+                                            >
+                                                {t('feedback_review_reanalyze')}
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
-                                {acceptHint ? (
+                                {item.status === 'applied' ? (
+                                    <div className="meta" style={{ marginTop: 8 }}>{t('feedback_review_accept_already')}</div>
+                                ) : (acceptHint ? (
                                     <div className="meta" style={{ marginTop: 8 }}>{acceptHint}</div>
-                                ) : null}
+                                ) : null)}
                             </div>
                         )
                     })
