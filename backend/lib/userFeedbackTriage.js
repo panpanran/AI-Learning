@@ -505,6 +505,8 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
     const id = Number(feedbackId);
     if (!pool || !Number.isInteger(id)) return { ok: false, error: 'bad_id' };
 
+    const autoApply = deps.autoApply !== undefined ? Boolean(deps.autoApply) : AUTO_APPLY;
+
     const loaded = await loadFeedbackItemsForTriage(pool, [id]);
     if (!loaded.length) {
         const fbRes = await pool.query(
@@ -521,9 +523,9 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
         if (isAgentsFeedbackTriageEnabled()) {
             const agentsResult = await runAgentsFeedbackTriage({
                 items: loaded,
-                autoApply: AUTO_APPLY,
+                autoApply,
                 minConfidence: APPLY_MIN_CONFIDENCE,
-                meta: { source: 'express_single', feedback_id: id },
+                meta: { source: 'express_single', feedback_id: id, auto_apply: autoApply },
             });
             if (agentsResult && Array.isArray(agentsResult.items) && agentsResult.items.length) {
                 const applied = await applyAgentsTriageResults(pool, agentsResult.items);
@@ -543,7 +545,7 @@ async function triageUserFeedbackById(pool, feedbackId, deps = {}) {
         );
     }
 
-    return triageUserFeedbackLocally(pool, loaded[0], deps);
+    return triageUserFeedbackLocally(pool, loaded[0], { ...deps, autoApply });
 }
 
 async function loadFeedbackItemsForTriage(pool, feedbackIds) {
@@ -738,8 +740,10 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
     const llmConfidence = proposed && proposed.confidence != null
         ? Number(proposed.confidence)
         : (llm && llm.confidence != null ? Number(llm.confidence) : null);
-    const llmApplicable = canAutoApplyLlm(question, proposed, llmConfidence);
-    const shouldApply = AUTO_APPLY && proposed && (mathApplicable || llmApplicable)
+    // Human re-analyze can force autoApply=false so the row stays acknowledged for Accept.
+    const autoApply = deps.autoApply !== undefined ? Boolean(deps.autoApply) : AUTO_APPLY;
+    const llmApplicable = autoApply && canAutoApplyLlm(question, proposed, llmConfidence);
+    const shouldApply = autoApply && proposed && (mathApplicable || llmApplicable)
         && (proposed.content_cn || proposed.content_en
             || proposed.answer_cn || proposed.answer_en
             || proposed.explanation_cn || proposed.explanation_en);

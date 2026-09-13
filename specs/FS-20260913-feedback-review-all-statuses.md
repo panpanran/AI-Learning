@@ -37,6 +37,7 @@
 
 - Default list `status=all`; UI chips All/open/acknowledged/applied/dismissed.
 - Also fixed bank Q2249: answer **1100** (548→500, 639→600); feedback id=2 marked applied (AI had wrongly dismissed; explanation had claimed 639→700).
+- **2026-09-13 UX:** Accept disabled when already `applied` (with on-screen hint). Human **Re-analyze** forces `autoApply=false` so the row lands in `acknowledged` for Accept instead of silently re-applying.
 
 ## 11. Evidence
 

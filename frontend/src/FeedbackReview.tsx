@@ -131,13 +131,23 @@ export default function FeedbackReview() {
         setBusyId(id)
         setNote(t('feedback_review_reanalyzing'))
         try {
-            await API.post(
+            const r = await API.post(
                 `/api/user-feedback/${id}/reanalyze`,
                 {},
                 { headers: { Authorization: `Bearer ${token}` } }
             )
             await load()
-            setNote(t('feedback_review_reanalyzed'))
+            const st = r?.data?.triage?.status
+            setNote(
+                st
+                    ? t('feedback_review_reanalyzed_status', { status: st })
+                    : t('feedback_review_reanalyzed')
+            )
+            if (st === 'acknowledged' || st === 'open') {
+                setStatusFilter(st as StatusFilter)
+            } else if (st) {
+                setStatusFilter('all')
+            }
         } catch (err: any) {
             const msg = err?.response?.data?.error || t('feedback_review_action_failed')
             setNote(String(msg))
@@ -243,13 +253,16 @@ export default function FeedbackReview() {
                             explanation_cn: '', explanation_en: '', options: null,
                         }
                         const p = item.proposed_fix
-                        const canAccept = hasProposedCae(p)
+                        const canAccept = hasProposedCae(p) && item.status !== 'applied'
                         const pending = isPending(item.status)
                         const busy = busyId === item.id
                         const conf = p && typeof p.confidence === 'number' ? p.confidence : null
                         const created = item.created_at
                             ? new Date(item.created_at).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US')
                             : ''
+                        const acceptHint = item.status === 'applied'
+                            ? t('feedback_review_accept_already')
+                            : (!hasProposedCae(p) ? t('feedback_review_no_proposal') : '')
 
                         return (
                             <div key={item.id} className="card" style={{ marginBottom: 12 }}>
@@ -264,6 +277,12 @@ export default function FeedbackReview() {
                                         {created ? ` · ${created}` : ''}
                                     </div>
                                 </div>
+
+                                {item.status === 'applied' ? (
+                                    <div className="meta" style={{ marginTop: 8 }}>
+                                        {t('feedback_review_applied_hint')}
+                                    </div>
+                                ) : null}
 
                                 <div style={{ marginTop: 8 }}>
                                     <div className="meta">{t('feedback_review_your_comment')}</div>
@@ -294,7 +313,7 @@ export default function FeedbackReview() {
 
                                     <div>
                                         <div className="meta">{t('feedback_review_proposed')}</div>
-                                        {canAccept || (p && p.reason) ? (
+                                        {hasProposedCae(p) || (p && p.reason) ? (
                                             <>
                                                 {(p?.content_cn || p?.content_en) ? (
                                                     <div style={{ fontWeight: 600 }}>
@@ -325,9 +344,9 @@ export default function FeedbackReview() {
                                     <button
                                         type="button"
                                         className="btn primary"
-                                        disabled={busy || !canAccept || (!pending && item.status === 'applied')}
+                                        disabled={busy || !canAccept}
                                         onClick={() => decide(item.id, 'accept')}
-                                        title={!canAccept ? t('feedback_review_no_proposal') : undefined}
+                                        title={acceptHint || undefined}
                                     >
                                         {t('feedback_review_accept')}
                                     </button>
@@ -348,6 +367,9 @@ export default function FeedbackReview() {
                                         {t('feedback_review_reanalyze')}
                                     </button>
                                 </div>
+                                {acceptHint ? (
+                                    <div className="meta" style={{ marginTop: 8 }}>{acceptHint}</div>
+                                ) : null}
                             </div>
                         )
                     })

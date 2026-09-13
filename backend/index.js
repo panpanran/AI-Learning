@@ -4132,10 +4132,11 @@ app.post('/api/user-feedback/:id/reanalyze', async (req, res) => {
             [id]
         );
 
-        // Run triage soon; await so UI can refresh with new proposal (still bounded by OpenAI).
+        // Human-triggered reanalyze: never auto-apply — leave as acknowledged for Accept.
         const result = await triageUserFeedbackById(pool, id, {
             aiClient: getOpenAI(),
             createChatCompletionJson,
+            autoApply: false,
         });
         return res.json({ ok: true, triage: result });
     } catch (e) {
