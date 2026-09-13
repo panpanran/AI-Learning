@@ -159,6 +159,10 @@ async function llmProposeFix({ aiClient, createChatCompletionJson, question, fee
                     + 'You may fix ONLY these fields: question stem (content), correct answer, and explanation '
                     + '(both Chinese and English). Do NOT invent new options, change option lists, KP, or metadata. '
                     + 'If the correct answer changes, it MUST be exactly one of the existing options. '
+                    + 'Rounding rule: look at the tens digit; if it is 0-4 round down to the lower hundred, if 5-9 round up. '
+                    + 'Example: 548→500, 639→600, sum=1100. '
+                    + 'reason must be ONE short coherent sentence (max 200 chars). Never contradict yourself. '
+                    + 'If the bank answer and explanation are already correct, set dismiss=true, category=not_a_bug, proposed_fix=null. '
                     + 'If feedback is about student difficulty (not a content bug), set dismiss=true.',
             },
             {
@@ -181,7 +185,8 @@ async function llmProposeFix({ aiClient, createChatCompletionJson, question, fee
                     + '  }|null\n'
                     + '}\n'
                     + 'Only include fields that should change. Omit or null fields that stay the same. '
-                    + 'If unsure, set proposed_fix null and dismiss false with lower confidence.',
+                    + 'If unsure, set proposed_fix null and dismiss false with lower confidence. '
+                    + 'Keep "reason" short and non-contradictory.',
             },
         ],
     });
@@ -694,6 +699,45 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
         return { ok: true, status: 'dismissed', reason: 'question_missing', source: 'express' };
     }
 
+    const autoApply = deps.autoApply !== undefined ? Boolean(deps.autoApply) : AUTO_APPLY;
+    const given = String(feedback.given_answer || '').trim();
+    const bankMatchesGiven = given && (
+        answersMatch(given, question.answer_cn) || answersMatch(given, question.answer_en)
+    );
+
+    // Bank already equals the reported "given" answer — do not ask the LLM (it often contradicts itself).
+    if (bankMatchesGiven) {
+        const clean = {
+            answer_cn: question.answer_cn || given,
+            answer_en: question.answer_en || given,
+            explanation_cn: question.explanation_cn || null,
+            explanation_en: question.explanation_en || null,
+            reason: 'Bank answer already matches the given answer. No change needed.',
+            confidence: 1,
+            source: 'already_correct',
+        };
+        if (autoApply) {
+            await pool.query(
+                `UPDATE user_question_feedback
+                 SET status = 'dismissed',
+                     category = 'not_a_bug',
+                     proposed_fix = $2::jsonb
+                 WHERE id = $1`,
+                [id, JSON.stringify({ ...clean, dismiss: true })]
+            );
+            return { ok: true, status: 'dismissed', category: 'not_a_bug', source: 'express' };
+        }
+        await pool.query(
+            `UPDATE user_question_feedback
+             SET status = 'acknowledged',
+                 category = 'not_a_bug',
+                 proposed_fix = $2::jsonb
+             WHERE id = $1`,
+            [id, JSON.stringify(clean)]
+        );
+        return { ok: true, status: 'acknowledged', category: 'not_a_bug', proposed: clean, source: 'express' };
+    }
+
     // Prefer deterministic math path first
     const expected = computeMathResult(parseMetadata(question.metadata));
     let proposed = null;
@@ -725,10 +769,13 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
     if (llm && typeof llm === 'object') {
         if (llm.category) category = String(llm.category).slice(0, 64);
         if (llm.dismiss === true) dismiss = true;
+        const shortReason = llm.reason != null
+            ? String(llm.reason).replace(/\s+/g, ' ').trim().slice(0, 240)
+            : null;
         if (!proposed && llm.proposed_fix && typeof llm.proposed_fix === 'object') {
             proposed = {
                 ...llm.proposed_fix,
-                reason: llm.reason || null,
+                reason: shortReason,
                 confidence: llm.confidence != null ? Number(llm.confidence) : null,
                 source: 'llm',
             };
@@ -738,13 +785,13 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
             if (pf.content_en) proposed.content_en = pf.content_en;
             if (pf.explanation_cn) proposed.explanation_cn = pf.explanation_cn;
             if (pf.explanation_en) proposed.explanation_en = pf.explanation_en;
-            if (llm.reason) proposed.reason = `${proposed.reason || ''}; ${llm.reason}`.trim();
+            if (shortReason) proposed.reason = shortReason;
             if (llm.confidence != null && proposed.confidence == null) {
                 proposed.confidence = Number(llm.confidence);
             }
             proposed.source = proposed.source || 'math_verify+llm';
-        } else if (!proposed && llm.reason) {
-            proposed = { reason: llm.reason, confidence: llm.confidence, source: 'llm' };
+        } else if (!proposed && shortReason) {
+            proposed = { reason: shortReason, confidence: llm.confidence, source: 'llm' };
         }
     }
 
@@ -765,7 +812,6 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
         ? Number(proposed.confidence)
         : (llm && llm.confidence != null ? Number(llm.confidence) : null);
     // Human re-analyze can force autoApply=false so the row stays acknowledged for Accept.
-    const autoApply = deps.autoApply !== undefined ? Boolean(deps.autoApply) : AUTO_APPLY;
     const llmApplicable = autoApply && canAutoApplyLlm(question, proposed, llmConfidence);
     const shouldApply = autoApply && proposed && (mathApplicable || llmApplicable)
         && (proposed.content_cn || proposed.content_en

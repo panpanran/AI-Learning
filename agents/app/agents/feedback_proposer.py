@@ -267,6 +267,9 @@ def llm_propose_fix(
                     "You may fix ONLY these fields: question stem (content), correct answer, and explanation "
                     "(both Chinese and English). Do NOT invent new options, change option lists, KP, or metadata. "
                     "If the answer changes, it MUST match an existing option text. "
+                    "Rounding: tens digit 0-4 → round down; 5-9 → round up. Example: 548→500, 639→600, sum=1100. "
+                    "reason must be ONE short coherent sentence (max 200 chars). Never contradict yourself. "
+                    "If bank answer+explanation are already correct, set dismiss=true, category=not_a_bug, proposed_fix=null. "
                     "If feedback is about student difficulty (not a content bug), set dismiss=true."
                 ),
             },
@@ -326,6 +329,30 @@ def propose_for_item(
     category = str(feedback.get("category") or "other")
     dismiss = False
     llm: dict[str, Any] | None = None
+
+    given = str(feedback.get("given_answer") or "").strip()
+    bank_matches_given = bool(given) and (
+        answers_match(given, question.get("answer_cn"))
+        or answers_match(given, question.get("answer_en"))
+    )
+    if bank_matches_given:
+        return {
+            "feedback_id": feedback_id,
+            "question_id": question_id,
+            "question": question,
+            "category": "other",
+            "dismiss": False,
+            "proposed_fix": {
+                "answer_cn": question.get("answer_cn") or given,
+                "answer_en": question.get("answer_en") or given,
+                "explanation_cn": question.get("explanation_cn"),
+                "explanation_en": question.get("explanation_en"),
+                "reason": "Bank answer already matches the given answer. No change needed.",
+                "confidence": 1.0,
+                "source": "already_correct",
+            },
+            "llm": None,
+        }
 
     if expected:
         stored_ok = answers_match(question.get("answer_cn"), expected) or answers_match(
