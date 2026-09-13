@@ -4042,7 +4042,7 @@ app.get('/api/user-feedback', async (req, res) => {
 
         const status = req.query && req.query.status != null
             ? String(req.query.status)
-            : 'acknowledged,open';
+            : 'all';
         const limit = req.query && req.query.limit != null ? Number(req.query.limit) : 50;
         const items = await listUserFeedback(pool, { userIds, status, limit });
         return res.json({ items });
@@ -4123,12 +4123,12 @@ app.post('/api/user-feedback/:id/reanalyze', async (req, res) => {
             [id, userIds]
         );
         if (!own.rows[0]) return res.status(404).json({ error: 'feedback not found' });
-        if (own.rows[0].status === 'applied' || own.rows[0].status === 'dismissed') {
-            return res.status(400).json({ error: 'Already finalized' });
-        }
 
+        // Reopen finalized rows so parents can override a bad auto-dismiss/apply.
         await pool.query(
-            `UPDATE user_question_feedback SET status = 'open' WHERE id = $1`,
+            `UPDATE user_question_feedback
+             SET status = 'open', applied_at = NULL
+             WHERE id = $1`,
             [id]
         );
 

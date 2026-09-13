@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import API from './api'
@@ -37,6 +37,9 @@ type FeedbackItem = {
     }
 }
 
+const STATUS_FILTERS = ['all', 'open', 'acknowledged', 'applied', 'dismissed'] as const
+type StatusFilter = typeof STATUS_FILTERS[number]
+
 function pickLang(lang: 'zh' | 'en', cn: string, en: string) {
     return lang === 'zh' ? (cn || en) : (en || cn)
 }
@@ -48,6 +51,10 @@ function hasProposedCae(p: ProposedFix | null | undefined) {
         || p.answer_cn || p.answer_en
         || p.explanation_cn || p.explanation_en
     )
+}
+
+function isPending(status: string) {
+    return status === 'open' || status === 'acknowledged'
 }
 
 export default function FeedbackReview() {
@@ -63,6 +70,7 @@ export default function FeedbackReview() {
 
     const [loading, setLoading] = useState(false)
     const [items, setItems] = useState<FeedbackItem[]>([])
+    const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
     const [busyId, setBusyId] = useState<number | null>(null)
     const [note, setNote] = useState('')
 
@@ -73,7 +81,7 @@ export default function FeedbackReview() {
         try {
             const r = await API.get('/api/user-feedback', {
                 headers: { Authorization: `Bearer ${token}` },
-                params: { status: 'acknowledged,open', limit: 50 },
+                params: { status: 'all', limit: 100 },
             })
             const rows: FeedbackItem[] = (r && r.data && Array.isArray(r.data.items)) ? r.data.items : []
             setItems(rows)
@@ -93,6 +101,11 @@ export default function FeedbackReview() {
         load()
     }, [load])
 
+    const visible = useMemo(() => {
+        if (statusFilter === 'all') return items
+        return items.filter((x) => x.status === statusFilter)
+    }, [items, statusFilter])
+
     const decide = async (id: number, action: 'accept' | 'reject') => {
         if (!token || busyId != null) return
         setBusyId(id)
@@ -103,7 +116,7 @@ export default function FeedbackReview() {
                 { action },
                 { headers: { Authorization: `Bearer ${token}` } }
             )
-            setItems((prev) => prev.filter((x) => x.id !== id))
+            await load()
             setNote(action === 'accept' ? t('feedback_review_accepted') : t('feedback_review_rejected'))
         } catch (err: any) {
             const msg = err?.response?.data?.error || t('feedback_review_action_failed')
@@ -203,22 +216,40 @@ export default function FeedbackReview() {
                 <h2 style={{ marginTop: 0, textAlign: 'center' }}>{t('feedback_review')}</h2>
                 <div className="meta" style={{ textAlign: 'center', marginBottom: 12 }}>{t('feedback_review_note')}</div>
 
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'center', marginBottom: 12 }}>
+                    {STATUS_FILTERS.map((s) => (
+                        <button
+                            key={s}
+                            type="button"
+                            className={statusFilter === s ? 'btn primary' : 'btn'}
+                            onClick={() => setStatusFilter(s)}
+                        >
+                            {t(`feedback_status_${s}`)}
+                            {s === 'all' ? ` (${items.length})` : ` (${items.filter((x) => x.status === s).length})`}
+                        </button>
+                    ))}
+                </div>
+
                 {note ? <div className="meta" style={{ marginBottom: 10, textAlign: 'center' }}>{note}</div> : null}
 
                 {loading ? (
                     <div className="placeholder">{t('loading') || '…'}</div>
-                ) : items.length === 0 ? (
+                ) : visible.length === 0 ? (
                     <div className="placeholder">{t('feedback_review_empty')}</div>
                 ) : (
-                    items.map((item) => {
+                    visible.map((item) => {
                         const q = item.question || {
                             content_cn: '', content_en: '', answer_cn: '', answer_en: '',
                             explanation_cn: '', explanation_en: '', options: null,
                         }
                         const p = item.proposed_fix
                         const canAccept = hasProposedCae(p)
+                        const pending = isPending(item.status)
                         const busy = busyId === item.id
                         const conf = p && typeof p.confidence === 'number' ? p.confidence : null
+                        const created = item.created_at
+                            ? new Date(item.created_at).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US')
+                            : ''
 
                         return (
                             <div key={item.id} className="card" style={{ marginBottom: 12 }}>
@@ -230,6 +261,7 @@ export default function FeedbackReview() {
                                     <div className="meta">
                                         {item.status}
                                         {conf != null ? ` · ${(conf * 100).toFixed(0)}%` : ''}
+                                        {created ? ` · ${created}` : ''}
                                     </div>
                                 </div>
 
@@ -240,6 +272,9 @@ export default function FeedbackReview() {
                                         <div className="meta" style={{ marginTop: 4 }}>
                                             {t('your_answer')}: {item.given_answer}
                                         </div>
+                                    ) : null}
+                                    {item.category ? (
+                                        <div className="meta">{t('feedback_review_category')}: {item.category}</div>
                                     ) : null}
                                 </div>
 
@@ -259,7 +294,7 @@ export default function FeedbackReview() {
 
                                     <div>
                                         <div className="meta">{t('feedback_review_proposed')}</div>
-                                        {canAccept ? (
+                                        {canAccept || (p && p.reason) ? (
                                             <>
                                                 {(p?.content_cn || p?.content_en) ? (
                                                     <div style={{ fontWeight: 600 }}>
@@ -290,15 +325,16 @@ export default function FeedbackReview() {
                                     <button
                                         type="button"
                                         className="btn primary"
-                                        disabled={busy || !canAccept}
+                                        disabled={busy || !canAccept || (!pending && item.status === 'applied')}
                                         onClick={() => decide(item.id, 'accept')}
+                                        title={!canAccept ? t('feedback_review_no_proposal') : undefined}
                                     >
                                         {t('feedback_review_accept')}
                                     </button>
                                     <button
                                         type="button"
                                         className="btn"
-                                        disabled={busy}
+                                        disabled={busy || !pending}
                                         onClick={() => decide(item.id, 'reject')}
                                     >
                                         {t('feedback_review_reject')}

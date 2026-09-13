@@ -367,7 +367,10 @@ async function decideUserFeedback(pool, {
         throw err;
     }
     if (feedback.status === 'applied' || feedback.status === 'dismissed') {
-        return { id, status: feedback.status, skipped: true };
+        if (act === 'reject') {
+            return { id, status: feedback.status, skipped: true };
+        }
+        // accept on finalized: allow re-apply if CAE proposal exists
     }
 
     if (act === 'reject') {
@@ -432,7 +435,7 @@ async function decideUserFeedback(pool, {
 
 async function listUserFeedback(pool, {
     userIds,
-    status = 'acknowledged',
+    status = 'all',
     limit = 50,
 }) {
     const ids = (Array.isArray(userIds) ? userIds : [])
@@ -441,11 +444,18 @@ async function listUserFeedback(pool, {
     if (!pool || !ids.length) return [];
 
     const lim = Math.max(1, Math.min(100, Number(limit) || 50));
-    const statuses = String(status || 'acknowledged')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    const useStatuses = statuses.length ? statuses : ['acknowledged'];
+    const raw = String(status == null ? 'all' : status).trim();
+    const statuses = raw === '' || raw.toLowerCase() === 'all'
+        ? []
+        : raw.split(',').map((s) => s.trim()).filter(Boolean);
+
+    const params = [ids];
+    let statusClause = '';
+    if (statuses.length) {
+        params.push(statuses);
+        statusClause = `AND f.status = ANY($${params.length}::text[])`;
+    }
+    params.push(lim);
 
     const r = await pool.query(
         `SELECT f.id, f.user_id, f.question_id, f.knowledge_point_id, f.grade_id, f.subject_id,
@@ -455,10 +465,10 @@ async function listUserFeedback(pool, {
          FROM user_question_feedback f
          LEFT JOIN questions q ON q.id = f.question_id
          WHERE f.user_id = ANY($1::int[])
-           AND f.status = ANY($2::text[])
+           ${statusClause}
          ORDER BY f.created_at DESC
-         LIMIT $3`,
-        [ids, useStatuses, lim]
+         LIMIT $${params.length}`,
+        params
     );
 
     return (r.rows || []).map((row) => ({
