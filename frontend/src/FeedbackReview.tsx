@@ -53,6 +53,39 @@ function hasProposedCae(p: ProposedFix | null | undefined) {
     )
 }
 
+function optionTexts(options: unknown): string[] {
+    if (!options) return []
+    let parsed: any = options
+    if (typeof options === 'string') {
+        try { parsed = JSON.parse(options) } catch { return [] }
+    }
+    const out: string[] = []
+    if (Array.isArray(parsed)) {
+        for (const o of parsed) out.push(String(o))
+        return out
+    }
+    if (parsed && typeof parsed === 'object') {
+        for (const lang of ['zh', 'en', 'cn']) {
+            if (Array.isArray(parsed[lang])) {
+                for (const o of parsed[lang]) out.push(String(o))
+            }
+        }
+    }
+    return out
+}
+
+function canAcceptGivenAnswer(item: FeedbackItem): boolean {
+    const given = String(item.given_answer || '').trim()
+    if (!given) return false
+    const texts = optionTexts(item.question && item.question.options)
+    if (!texts.length) return Boolean(given)
+    const g = given.toLowerCase()
+    return texts.some((t) => {
+        const x = String(t).trim().toLowerCase()
+        return x === g || x.includes(g) || g.includes(x)
+    })
+}
+
 function isPending(status: string) {
     return status === 'open' || status === 'acknowledged'
 }
@@ -253,16 +286,22 @@ export default function FeedbackReview() {
                             explanation_cn: '', explanation_en: '', options: null,
                         }
                         const p = item.proposed_fix
-                        const canAccept = hasProposedCae(p) && item.status !== 'applied'
+                        const givenOk = canAcceptGivenAnswer(item)
+                        const canAccept = item.status !== 'applied' && (hasProposedCae(p) || givenOk)
                         const pending = isPending(item.status)
                         const busy = busyId === item.id
                         const conf = p && typeof p.confidence === 'number' ? p.confidence : null
                         const created = item.created_at
                             ? new Date(item.created_at).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US')
                             : ''
-                        const acceptHint = item.status === 'applied'
-                            ? t('feedback_review_accept_already')
-                            : (!hasProposedCae(p) ? t('feedback_review_no_proposal') : '')
+                        let acceptHint = ''
+                        if (item.status === 'applied') {
+                            acceptHint = t('feedback_review_accept_already')
+                        } else if (!hasProposedCae(p) && givenOk) {
+                            acceptHint = t('feedback_review_accept_given', { answer: item.given_answer })
+                        } else if (!hasProposedCae(p) && !givenOk) {
+                            acceptHint = t('feedback_review_no_proposal')
+                        }
 
                         return (
                             <div key={item.id} className="card" style={{ marginBottom: 12 }}>

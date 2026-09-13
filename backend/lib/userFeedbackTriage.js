@@ -385,19 +385,14 @@ async function decideUserFeedback(pool, {
     }
 
     // accept
-    const proposed = feedback.proposed_fix && typeof feedback.proposed_fix === 'object'
-        ? feedback.proposed_fix
+    let proposed = feedback.proposed_fix && typeof feedback.proposed_fix === 'object'
+        ? { ...feedback.proposed_fix }
         : null;
-    const hasCae = proposed && (
+    let hasCae = proposed && (
         proposed.content_cn || proposed.content_en
         || proposed.answer_cn || proposed.answer_en
         || proposed.explanation_cn || proposed.explanation_en
     );
-    if (!hasCae) {
-        const err = new Error('No proposed content/answer/explanation to apply. Re-analyze first.');
-        err.status = 400;
-        throw err;
-    }
 
     const qRes = await pool.query(
         `SELECT id, options, answer_cn, answer_en, content_cn, content_en,
@@ -409,6 +404,35 @@ async function decideUserFeedback(pool, {
     if (!question) {
         const err = new Error('question not found');
         err.status = 404;
+        throw err;
+    }
+
+    // Parent override: if AI only left a reason, Accept can apply the child's given answer
+    // when it matches an existing option.
+    if (!hasCae) {
+        const given = String(feedback.given_answer || '').trim();
+        if (given) {
+            const opt = findMatchingOption(question.options, given);
+            if (opt || !question.options) {
+                const answerText = opt || given;
+                proposed = {
+                    ...(proposed || {}),
+                    answer_cn: answerText,
+                    answer_en: answerText,
+                    reason: (proposed && proposed.reason)
+                        ? `${proposed.reason}; parent accepted given answer`
+                        : 'Parent accepted given answer from feedback',
+                    source: 'human_given_answer',
+                    confidence: 1,
+                };
+                hasCae = true;
+            }
+        }
+    }
+
+    if (!hasCae || !proposed) {
+        const err = new Error('No proposed content/answer/explanation to apply. Re-analyze first, or provide a given answer that matches an option.');
+        err.status = 400;
         throw err;
     }
 
@@ -428,7 +452,7 @@ async function decideUserFeedback(pool, {
              proposed_fix = COALESCE(proposed_fix, '{}'::jsonb) || $2::jsonb,
              applied_at = NOW()
          WHERE id = $1`,
-        [id, JSON.stringify({ human_decision: 'accept', applied_by: 'review_ui' })]
+        [id, JSON.stringify({ human_decision: 'accept', applied_by: 'review_ui', ...proposed })]
     );
     return { id, status: 'applied', question_id: question.id };
 }
