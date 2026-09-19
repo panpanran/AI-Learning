@@ -81,10 +81,28 @@ export default function QuestionChart({ spec }: { spec: QuestionChartSpec | null
                     animation: false,
                     plugins: {
                         legend: { display: parsed.kind === 'pie' },
+                        tooltip: parsed.yLabel
+                            ? {
+                                callbacks: {
+                                    label: (ctx) => {
+                                        const v = ctx.parsed && typeof ctx.parsed === 'object' && 'y' in ctx.parsed
+                                            ? ctx.parsed.y
+                                            : ctx.formattedValue
+                                        return `${v} ${parsed.yLabel}`
+                                    },
+                                },
+                            }
+                            : undefined,
                     },
+                    layout: parsed.yLabel && parsed.kind !== 'pie' ? { padding: { left: 8 } } : undefined,
                     scales: parsed.kind === 'pie' ? undefined : {
                         x: { ticks: { maxRotation: 0 } },
-                        y: { beginAtZero: true },
+                        y: {
+                            beginAtZero: true,
+                            title: parsed.yLabel
+                                ? { display: true, text: parsed.yLabel, font: { size: 13, weight: 'bold' } }
+                                : undefined,
+                        },
                     },
                 },
             })

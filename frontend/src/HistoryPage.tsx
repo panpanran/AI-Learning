@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import API from './api'
 import QuestionChart from './QuestionChart'
-import { parseQuestionChart } from './parseQuestionChart'
+import { parseQuestionChart, displayQuestionStem } from './parseQuestionChart'
 
 type HistoryItem = {
     questionId?: number
@@ -149,7 +149,7 @@ export default function HistoryPage({ token }: { token: string }) {
 
                         <div style={{ marginTop: 10 }}>
                             {g.list.map((it, idx) => {
-                                const content = lang === 'zh' ? (it.content_cn || '') : (it.content_en || '')
+                                const content = displayQuestionStem(it, lang)
                                 const correctAnswer = lang === 'zh' ? (it.answer_cn || '') : (it.answer_en || '')
                                 const explanation = lang === 'zh' ? (it.explanation_cn || '') : (it.explanation_en || '')
                                 const kpName = lang === 'zh'

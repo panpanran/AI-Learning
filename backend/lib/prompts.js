@@ -38,8 +38,9 @@ IMPORTANT (feature extraction / metadata):
     { "type": "division"|"multiplication"|"addition"|"subtraction"|"fraction"|"geometry"|"other", "nums": number[], "context": string|null }
         Example: {"type":"division","nums":[12,3],"context":"apples"}
 - If the item refers to a specific bar, pie, or line data display (not a definition of chart types), metadata MUST ALSO include:
-    "chart": { "type": "bar"|"pie"|"line", "labels": string[], "values": number[], "title": string|null }
-        labels.length === values.length >= 2. Repeat the same labels and values in the stem. The frontend draws the chart with Chart.js. Do NOT write "look at the chart" without metadata.chart.
+    "chart": { "type": "bar"|"pie"|"line", "labels": string[], "values": number[], "title": string|null, "yLabel": string|null }
+        labels.length === values.length >= 2. Repeat the same labels and values in the stem. Put axis units in yLabel (e.g. "mm"). The frontend draws the chart with Chart.js. Do NOT write "look at the chart" without metadata.chart.
+        If the question asks which unit is on the chart, put that unit ONLY on the axis (yLabel), never in content_en or content_cn. Bad: "rainfall in millimeters". Good: "Which unit is used in a bar chart showing monthly rainfall?" with yLabel "mm".
 - For NON-math questions, metadata can be any stable JSON object (fields may differ by subject).
 - For vocabulary-style questions, prefer this stable shape (all free-text values in English):
         {"type":"vocabulary","word":"apple","context":"fruit"}
@@ -73,8 +74,9 @@ The plan is an array of integers with length {{num_questions}}. For question i (
     {"type":"division"|"multiplication"|"addition"|"subtraction"|"fraction"|"geometry"|"other","nums":number[],"context":string|null}
         例：{"type":"division","nums":[12,3],"context":"apples"}
 - 如果题目是具体的柱状图/饼图/折线数据（不是图表类型定义题），metadata 还必须包含：
-    "chart": { "type": "bar"|"pie"|"line", "labels": string[], "values": number[], "title": string|null }
-        labels.length === values.length >= 2。题干里重复同一组 labels/values。前端会用 Chart.js 画图。没有 metadata.chart 时不要写“看图”。
+    "chart": { "type": "bar"|"pie"|"line", "labels": string[], "values": number[], "title": string|null, "yLabel": string|null }
+        labels.length === values.length >= 2。题干里重复同一组 labels/values。坐标轴单位写在 yLabel（例如 "mm"）。前端会用 Chart.js 画图。没有 metadata.chart 时不要写“看图”。
+        若题目问的是单位，单位只能出现在图的坐标轴上，不能写进题干。错误："rainfall in millimeters"。正确："条形图显示每月降雨量，单位是什么？" 且 yLabel 为 "mm"。
 - 非数学题的 metadata 可以是任意稳定的 JSON 对象（不同学科字段可以不一样）。
 - 如果是“词汇/概念类”题目，建议使用这种稳定形状（自由文本全英文）：
         {"type":"vocabulary","word":"apple","context":"fruit"}

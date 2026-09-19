@@ -7,12 +7,15 @@ export type QuestionChartSpec = {
     title?: string
     caption?: string
     illustrative?: boolean
+    yLabel?: string
 }
 
 export type ChartQuestionInput = {
     content?: string
     content_cn?: string
     content_en?: string
+    answer_cn?: string
+    answer_en?: string
     metadata?: unknown
 }
 
@@ -59,6 +62,8 @@ function normalizeSpec(input: {
     labels?: unknown
     values?: unknown
     title?: unknown
+    yLabel?: unknown
+    y_label?: unknown
 }): QuestionChartSpec | null {
     const kindRaw = input.kind != null ? input.kind : input.type
     if (!isKind(kindRaw)) return null
@@ -66,7 +71,12 @@ function normalizeSpec(input: {
     const values = toFiniteNumbers(input.values)
     if (!labels || !values || labels.length !== values.length || labels.length < 2) return null
     const title = input.title != null && String(input.title).trim() ? String(input.title).trim() : undefined
-    return title ? { kind: kindRaw, labels, values, title } : { kind: kindRaw, labels, values }
+    const yRaw = input.yLabel != null ? input.yLabel : input.y_label
+    const yLabel = yRaw != null && String(yRaw).trim() ? String(yRaw).trim() : undefined
+    const spec: QuestionChartSpec = { kind: kindRaw, labels, values }
+    if (title) spec.title = title
+    if (yLabel) spec.yLabel = yLabel
+    return spec
 }
 
 function chartFromMetadata(metadata: unknown): QuestionChartSpec | null {
@@ -146,12 +156,76 @@ function isTrueConceptStem(text: string): boolean {
     return !hasConcreteScene
 }
 
-function illustrativeChart(stem: string, kind: QuestionChartKind, lang?: 'zh' | 'en'): QuestionChartSpec {
+function pickAnswer(q: ChartQuestionInput, lang?: 'zh' | 'en'): string {
+    if (lang === 'zh') return String(q.answer_cn || q.answer_en || '')
+    return String(q.answer_en || q.answer_cn || '')
+}
+
+function shortUnit(answer: string, lang?: 'zh' | 'en'): string | undefined {
+    const a = String(answer || '').trim().toLowerCase()
+    if (!a) return undefined
+    if (/millimet|毫米|^mm$/.test(a)) return lang === 'zh' ? '毫米' : 'mm'
+    if (/centimet|厘米|^cm$/.test(a)) return lang === 'zh' ? '厘米' : 'cm'
+    if (/meter|metre|米/.test(a) && !/milli|centi|kilo/.test(a)) return lang === 'zh' ? '米' : 'm'
+    if (/liter|litre|升|^l$/.test(a)) return lang === 'zh' ? '升' : 'L'
+    if (/celsius|摄氏|°c/.test(a)) return '°C'
+    if (a.length <= 8) return String(answer).trim()
+    return undefined
+}
+
+export function stripLeakedUnitFromStem(content: string, answer?: string): string {
+    let text = String(content || '')
+    if (!text) return text
+    if (!/which unit|what unit|单位是|单位是什么/i.test(text)) return text
+    const a = String(answer || '').trim()
+    const names = new Set<string>()
+    if (a) {
+        names.add(a)
+        names.add(a.replace(/s$/i, ''))
+    }
+    const blob = `${text} ${a}`
+    if (/millimet/i.test(blob) || /\bmm\b/i.test(blob) || /毫米/.test(blob)) {
+        names.add('millimeters')
+        names.add('millimetres')
+        names.add('millimeter')
+        names.add('millimetre')
+        names.add('mm')
+        names.add('毫米')
+    }
+    for (const name of names) {
+        if (!name) continue
+        const e = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        text = text.replace(new RegExp(`\\s*in\\s+${e}\\b`, 'ig'), '')
+        text = text.replace(new RegExp(`\\s*[（(]\\s*${e}\\s*[)）]`, 'ig'), '')
+    }
+    return text.replace(/\s{2,}/g, ' ').replace(/\s+([?？])/g, '$1').trim()
+}
+
+function inferYLabel(stem: string, lang: 'zh' | 'en' | undefined, answer: string): string | undefined {
+    const t = String(stem || '').toLowerCase()
+    const fromAnswer = shortUnit(answer, lang)
+    if (/rainfall|降水|降雨|rain/.test(t)) return lang === 'zh' ? '毫米' : 'mm'
+    if (/temperature|气温|温度/.test(t)) return '°C'
+    if (/which unit|what unit|单位/.test(t) && fromAnswer) return fromAnswer
+    return fromAnswer
+}
+
+export function displayQuestionStem(q: ChartQuestionInput, lang?: 'zh' | 'en'): string {
+    const raw = pickStem(q, lang)
+    return stripLeakedUnitFromStem(raw, pickAnswer(q, lang))
+}
+
+function illustrativeChart(
+    stem: string,
+    kind: QuestionChartKind,
+    lang: 'zh' | 'en' | undefined,
+    yLabel?: string
+): QuestionChartSpec {
     const labels = illustrativeLabels(stem, lang)
     const seed = hashStem(`${kind}|${stem}`)
     const values = labels.map((_, i) => seededInt(seed, i, 3, 12))
     const zh = lang === 'zh'
-    return {
+    const spec: QuestionChartSpec = {
         kind,
         labels,
         values,
@@ -159,6 +233,8 @@ function illustrativeChart(stem: string, kind: QuestionChartKind, lang?: 'zh' | 
         title: zh ? '示意图' : 'Example',
         caption: zh ? '示意图，数字仅供参考，不是题目数据' : 'Example chart; numbers are not part of the question',
     }
+    if (yLabel) spec.yLabel = yLabel
+    return spec
 }
 
 function cleanLabel(raw: string): string | null {
@@ -203,15 +279,26 @@ export function parseQuestionChart(
 ): QuestionChartSpec | null {
     if (!q) return null
     const fromMeta = chartFromMetadata(q.metadata)
-    if (fromMeta) return fromMeta
+    if (fromMeta) {
+        if (!fromMeta.yLabel) {
+            const inferred = inferYLabel(pickStem(q, lang), lang, pickAnswer(q, lang))
+            if (inferred) fromMeta.yLabel = inferred
+        }
+        return fromMeta
+    }
 
     const stem = pickStem(q, lang)
     const kinds = detectKinds(stem)
     const kind = kinds.length === 1 ? kinds[0] : null
     if (!kind) return null
+    const yLabel = inferYLabel(stem, lang, pickAnswer(q, lang))
     const pairs = extractLabelNumberPairs(stem)
-    if (pairs) return { kind, labels: pairs.labels, values: pairs.values }
+    if (pairs) {
+        const spec: QuestionChartSpec = { kind, labels: pairs.labels, values: pairs.values }
+        if (yLabel) spec.yLabel = yLabel
+        return spec
+    }
     if (bareNumbers(stem).length >= 2) return null
     if (isTrueConceptStem(stem)) return null
-    return illustrativeChart(stem, kind, lang)
+    return illustrativeChart(stem, kind, lang, yLabel)
 }

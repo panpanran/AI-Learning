@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseQuestionChart } from './parseQuestionChart'
+import { parseQuestionChart, stripLeakedUnitFromStem } from './parseQuestionChart'
 
 describe('parseQuestionChart', () => {
     it('uses metadata.chart bar spec (AC-1)', () => {
@@ -90,5 +90,30 @@ describe('parseQuestionChart', () => {
             content_en: 'In a bar chart, what does the length of the bar represent?',
         }, 'en')
         expect(spec).toBeNull()
+    })
+
+    it('strips leaked unit from English rainfall stem (AC-1)', () => {
+        const shown = stripLeakedUnitFromStem(
+            'Which unit is used in a bar chart showing monthly rainfall in millimeters?',
+            'Millimeters'
+        )
+        expect(shown.toLowerCase()).not.toContain('millimeter')
+        expect(shown.toLowerCase()).toContain('monthly rainfall')
+        expect(stripLeakedUnitFromStem(
+            'Which unit is used in a bar chart showing monthly rainfall in millimeters?'
+        ).toLowerCase()).not.toContain('millimeter')
+    })
+
+    it('puts mm on the Y axis for rainfall unit questions (AC-2)', () => {
+        const spec = parseQuestionChart({
+            content_en: 'Which unit is used in a bar chart showing monthly rainfall in millimeters?',
+            answer_en: 'Millimeters',
+            answer_cn: '毫米',
+        }, 'en')
+        expect(spec?.yLabel).toBe('mm')
+        expect(parseQuestionChart({
+            content_cn: '条形图显示每月降雨量，单位是什么？',
+            answer_cn: '毫米',
+        }, 'zh')?.yLabel).toBe('毫米')
     })
 })

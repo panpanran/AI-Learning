@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import API from './api'
 import TtsSpeakButton from './TtsSpeakButton'
 import QuestionChart from './QuestionChart'
-import { parseQuestionChart } from './parseQuestionChart'
+import { parseQuestionChart, displayQuestionStem } from './parseQuestionChart'
 
 type ResultItem = {
     questionId: number | string
@@ -295,7 +295,14 @@ function Results() {
                                 const answerFromDb = row ? (lang === 'zh' ? (row.answer_cn || '') : (row.answer_en || '')) : ''
                                 const expFromDb = row ? (lang === 'zh' ? (row.explanation_cn || '') : (row.explanation_en || '')) : ''
 
-                                const content = contentFromDb || (lang === 'zh' ? (a.content_cn || '') : (a.content_en || '')) || a.content || ''
+                                const contentRaw = contentFromDb || (lang === 'zh' ? (a.content_cn || '') : (a.content_en || '')) || a.content || ''
+                                const content = displayQuestionStem({
+                                    content: contentRaw,
+                                    content_cn: row?.content_cn || a.content_cn,
+                                    content_en: row?.content_en || a.content_en,
+                                    answer_cn: row?.answer_cn || a.answer_cn,
+                                    answer_en: row?.answer_en || a.answer_en,
+                                }, lang)
                                 const correctAnswer = answerFromDb || (lang === 'zh' ? (a.answer_cn || '') : (a.answer_en || '')) || a.correctAnswer || ''
                                 const explanation = expFromDb || (lang === 'zh' ? (a.explanation_cn || '') : (a.explanation_en || '')) || a.explanation || ''
                                 const alreadySent = !!feedbackDoneIds[String(a.questionId)]
@@ -325,6 +332,8 @@ function Results() {
                                                     content,
                                                     content_cn: row?.content_cn || a.content_cn,
                                                     content_en: row?.content_en || a.content_en,
+                                                    answer_cn: row?.answer_cn || a.answer_cn,
+                                                    answer_en: row?.answer_en || a.answer_en,
                                                     metadata: row?.metadata,
                                                 }, lang)} />
                                             </div>

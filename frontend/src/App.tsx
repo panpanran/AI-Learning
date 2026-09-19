@@ -8,7 +8,7 @@ import API from './api'
 import MenuBar from './MenuBar'
 import HistoryPage from './HistoryPage'
 import QuestionChart from './QuestionChart'
-import { parseQuestionChart } from './parseQuestionChart'
+import { parseQuestionChart, displayQuestionStem } from './parseQuestionChart'
 import GenerationProgressBar from './GenerationProgressBar'
 import { beginGenerationProgress, type GenerationProgressState } from './generationProgress'
 import './index.css'
@@ -665,9 +665,12 @@ function App() {
                                             {(() => {
                                                 const lang = effectiveLang
                                                 const hasBilingualContent = !!(q && (q.content_cn || q.content_en))
-                                                const content = hasBilingualContent
-                                                    ? (lang === 'zh' ? (q && q.content_cn) : (q && q.content_en)) || ''
-                                                    : ((q && q.content != null ? String(q.content) : '') || '')
+                                                const content = displayQuestionStem(
+                                                    hasBilingualContent
+                                                        ? q
+                                                        : { content: (q && q.content != null ? String(q.content) : '') || '', ...q },
+                                                    lang
+                                                )
 
                                                 const bilingualOpts = q && (q.options_bilingual || q.optionsBilingual || null)
                                                 const options = (bilingualOpts && (lang === 'zh' ? bilingualOpts.zh : bilingualOpts.en)) ||

@@ -33,7 +33,7 @@ IMPORTANT (feature extraction / metadata):
 - For EACH question, include a "metadata" object used for deduplication and retrieval.
 - metadata MUST be stable and language-independent; free-text fields in English only.
 - For MATH: {{"type":"division"|"multiplication"|"addition"|"subtraction"|"fraction"|"geometry"|"other","nums":number[],"context":string|null}}
-- For a specific bar/pie/line data display (not a chart-type definition), ALSO include metadata.chart: {{"type":"bar"|"pie"|"line","labels":[...],"values":[...],"title":null}}. labels.length === values.length >= 2. Repeat the same labels/values in the stem. Do NOT write "look at the chart" without metadata.chart.
+- For a specific bar/pie/line data display (not a chart-type definition), ALSO include metadata.chart: {{"type":"bar"|"pie"|"line","labels":[...],"values":[...],"title":null,"yLabel":"mm"}}. labels.length === values.length >= 2. Repeat the same labels/values in the stem. Axis units go in yLabel, never in a "which unit" stem (bad: "rainfall in millimeters").
 - For vocabulary: {{"type":"vocabulary","word":"...","context":"..."}}
 - Avoid similar patterns: {avoid_metadata}
 - HARD RULE for MATH: never reuse the same metadata.type + metadata.nums from avoid_metadata (e.g. do not keep generating 299+501). Pick fresh numbers every time.
@@ -56,7 +56,7 @@ USER_ZH = """为学生生成诊断测试。输入：{student_profile}。
 你必须严格生成{num_questions}道题。所有题目都是4选1客观选择题（type: "mcq"）。可参考片段：{retrieval_snippets}。
 
 重要：每题包含稳定的 metadata（自由文本用英文）。避开高频 metadata：{avoid_metadata}。
-如果题目是具体柱状/饼/折线数据（不是定义题），metadata 必须含 chart：{{"type":"bar"|"pie"|"line","labels":[...],"values":[...],"title":null}}，题干重复同一组数据；没有 chart 不要写“看图”。
+如果题目是具体柱状/饼/折线数据（不是定义题），metadata 必须含 chart：{{"type":"bar"|"pie"|"line","labels":[...],"values":[...],"title":null,"yLabel":"mm"}}，题干重复同一组数据；坐标轴单位写在 yLabel。问单位时不要把答案写进题干（不要写 rainfall in millimeters）。
 数学硬性规则：不要复用 avoid_metadata 里已有的 type+nums（例如不要反复出 299+501），每题换新数字；不同知识点也禁止共用同一套数字。
 历史质量反馈（用于改进出题；不要照抄原题）：{feedback_context}
 - few_shot_good：同知识点的高分例题
