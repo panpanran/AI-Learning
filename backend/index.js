@@ -3937,6 +3937,7 @@ app.get('/api/history/full', async (req, res) => {
                     q.answer_en,
                     q.explanation_cn,
                     q.explanation_en,
+                    q.metadata,
                     q.knowledge_point_id,
                   kp.name_cn AS knowledge_point_name_cn,
                   kp.name_en AS knowledge_point_name_en,
@@ -4300,7 +4301,7 @@ app.get('/api/questions/by-ids', async (req, res) => {
         const token = auth.replace('Bearer ', '');
         jwt.verify(token, JWT_SECRET);
         const r = await pool.query(
-            `SELECT id, content_cn, content_en, options, answer_cn, answer_en, explanation_cn, explanation_en, knowledge_point_id, created_at
+            `SELECT id, content_cn, content_en, options, answer_cn, answer_en, explanation_cn, explanation_en, knowledge_point_id, created_at, metadata
              FROM questions
              WHERE id = ANY($1::int[])`,
             [uniqueIds]

@@ -10,7 +10,9 @@ Quality rules (do internally, do NOT output your work):
 - Ensure distractor options are wrong but plausible.
 - Do NOT include step-by-step working; only include a one-sentence explanation.
 
-If a knowledge point involves shape recognition / geometry identification, do NOT rely on visual images. Do NOT ask the student to look at a picture. Instead, write the question using descriptive features (properties) in text only. Example: "A shape with four right angles and four equal sides is called what?"`,
+If a knowledge point involves shape recognition / geometry identification, do NOT rely on visual images. Do NOT ask the student to look at a picture. Instead, write the question using descriptive features (properties) in text only. Example: "A shape with four right angles and four equal sides is called what?"
+
+If the question is about a specific bar chart, pie chart, or line graph with data (not a definition of chart types), do NOT use photos. Put the series in metadata.chart so the frontend can draw it. Do not say "look at the chart" unless metadata.chart is present.`,
     system_zh: `你是出题与诊断的教师，输出必须为严格的 JSON。尽量简短并可解析。
 
 质量规则（请在内部完成计算与复核，但不要输出详细演算过程）：
@@ -19,7 +21,9 @@ If a knowledge point involves shape recognition / geometry identification, do NO
 - 干扰项必须错误但合理。
 - 解析只写一句话，不要写详细步骤。
 
-如果该知识点涉及图形识别/几何图形辨认，请不要通过视觉图片出题，不要让学生“看图”。请通过文字描述图形的特征/性质来出题。例如：“四个角都是直角，且四条边都相等的图形是什么？”`,
+如果该知识点涉及图形识别/几何图形辨认，请不要通过视觉图片出题，不要让学生“看图”。请通过文字描述图形的特征/性质来出题。例如：“四个角都是直角，且四条边都相等的图形是什么？”
+
+如果题目是关于具体的柱状图/条形图、饼图或折线图数据（不是问“什么是柱状图”这类定义题），不要用照片。把数据系列写进 metadata.chart，前端会画图。没有 metadata.chart 时，不要写“看图/见下图”。`,
     user_en: `Generate a diagnostic test for this student. Inputs: {{student_profile}}.
 Grade/difficulty guidance (MUST follow): {{grade_guidance}}
 
@@ -33,6 +37,9 @@ IMPORTANT (feature extraction / metadata):
 - For MATH questions, metadata MUST be exactly this shape:
     { "type": "division"|"multiplication"|"addition"|"subtraction"|"fraction"|"geometry"|"other", "nums": number[], "context": string|null }
         Example: {"type":"division","nums":[12,3],"context":"apples"}
+- If the item refers to a specific bar, pie, or line data display (not a definition of chart types), metadata MUST ALSO include:
+    "chart": { "type": "bar"|"pie"|"line", "labels": string[], "values": number[], "title": string|null }
+        labels.length === values.length >= 2. Repeat the same labels and values in the stem. The frontend draws the chart with Chart.js. Do NOT write "look at the chart" without metadata.chart.
 - For NON-math questions, metadata can be any stable JSON object (fields may differ by subject).
 - For vocabulary-style questions, prefer this stable shape (all free-text values in English):
         {"type":"vocabulary","word":"apple","context":"fruit"}
@@ -65,6 +72,9 @@ The plan is an array of integers with length {{num_questions}}. For question i (
 - 数学题的 metadata 必须严格是这种形状：
     {"type":"division"|"multiplication"|"addition"|"subtraction"|"fraction"|"geometry"|"other","nums":number[],"context":string|null}
         例：{"type":"division","nums":[12,3],"context":"apples"}
+- 如果题目是具体的柱状图/饼图/折线数据（不是图表类型定义题），metadata 还必须包含：
+    "chart": { "type": "bar"|"pie"|"line", "labels": string[], "values": number[], "title": string|null }
+        labels.length === values.length >= 2。题干里重复同一组 labels/values。前端会用 Chart.js 画图。没有 metadata.chart 时不要写“看图”。
 - 非数学题的 metadata 可以是任意稳定的 JSON 对象（不同学科字段可以不一样）。
 - 如果是“词汇/概念类”题目，建议使用这种稳定形状（自由文本全英文）：
         {"type":"vocabulary","word":"apple","context":"fruit"}

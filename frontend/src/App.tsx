@@ -7,6 +7,8 @@ import { useTranslation } from 'react-i18next'
 import API from './api'
 import MenuBar from './MenuBar'
 import HistoryPage from './HistoryPage'
+import QuestionChart from './QuestionChart'
+import { parseQuestionChart } from './parseQuestionChart'
 import GenerationProgressBar from './GenerationProgressBar'
 import { beginGenerationProgress, type GenerationProgressState } from './generationProgress'
 import './index.css'
@@ -684,6 +686,7 @@ function App() {
                                                                 title={lang === 'zh' ? '朗读题目和选项' : 'Read question and options'}
                                                             />
                                                         </div>
+                                                        <QuestionChart spec={parseQuestionChart(q, lang)} />
                                                         {q.type === 'mcq' && options && (
                                                             <div style={{ marginTop: 8 }}>
                                                                 {options.map((opt: any, i: number) => (

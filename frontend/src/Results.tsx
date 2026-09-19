@@ -3,6 +3,8 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import API from './api'
 import TtsSpeakButton from './TtsSpeakButton'
+import QuestionChart from './QuestionChart'
+import { parseQuestionChart } from './parseQuestionChart'
 
 type ResultItem = {
     questionId: number | string
@@ -28,6 +30,7 @@ type QuestionRow = {
     answer_en?: string
     explanation_cn?: string
     explanation_en?: string
+    metadata?: unknown
 }
 
 type FeedbackTarget = {
@@ -109,6 +112,7 @@ function Results() {
                         answer_en: row.answer_en != null ? String(row.answer_en) : '',
                         explanation_cn: row.explanation_cn != null ? String(row.explanation_cn) : '',
                         explanation_en: row.explanation_en != null ? String(row.explanation_en) : '',
+                        metadata: row.metadata,
                     }
                 }
                 if (!cancelled) setQuestionById(map)
@@ -317,6 +321,12 @@ function Results() {
                                                         title={lang === 'zh' ? '朗读题目' : 'Read question'}
                                                     />
                                                 </div>
+                                                <QuestionChart spec={parseQuestionChart({
+                                                    content,
+                                                    content_cn: row?.content_cn || a.content_cn,
+                                                    content_en: row?.content_en || a.content_en,
+                                                    metadata: row?.metadata,
+                                                }, lang)} />
                                             </div>
                                         ) : null}
 

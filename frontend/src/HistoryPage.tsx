@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import API from './api'
+import QuestionChart from './QuestionChart'
+import { parseQuestionChart } from './parseQuestionChart'
 
 type HistoryItem = {
     questionId?: number
@@ -16,6 +18,7 @@ type HistoryItem = {
     knowledge_point_id?: number
     knowledge_point_name_cn?: string
     knowledge_point_name_en?: string
+    metadata?: unknown
 }
 
 function toDayKey(iso: string) {
@@ -164,6 +167,7 @@ export default function HistoryPage({ token }: { token: string }) {
 
                                         <div style={{ marginTop: 8 }}>
                                             <div><strong>{lang === 'zh' ? '题目：' : 'Q: '}</strong>{content || '-'}</div>
+                                            <QuestionChart spec={parseQuestionChart(it, lang)} />
                                             <div style={{ marginTop: 6 }}><strong>{lang === 'zh' ? '你的答案：' : 'Your answer: '}</strong>{it.givenAnswer || '-'}</div>
                                             <div><strong>{lang === 'zh' ? '正确答案：' : 'Correct answer: '}</strong>{correctAnswer || '-'}</div>
                                             {kpLabel ? (
