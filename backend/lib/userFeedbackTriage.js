@@ -2,7 +2,9 @@
 
 /**
  * FS-20260907-user-feedback-phase2 + FS-20260907-feedback-ai-apply-cae
+ * + FS-20260919-history-rescore-after-feedback
  * Triage parent/student feedback: AI may fix content / answer / explanation only.
+ * Applying a new bank answer also rewrites history.correct for that question.
  */
 
 const AUTO_APPLY = String(process.env.USER_FEEDBACK_AUTO_APPLY ?? '1').trim() !== '0';
@@ -32,6 +34,73 @@ function answersMatch(a, b) {
     // allow "800" vs "800 apples"
     if (x.startsWith(y) || y.startsWith(x)) return true;
     return false;
+}
+
+function historyAnswerIsCorrect(given, answerCn, answerEn) {
+    return answersMatch(given, answerCn) || answersMatch(given, answerEn);
+}
+
+function proposedWritesAnswer(proposed) {
+    if (!proposed || typeof proposed !== 'object') return false;
+    const cn = proposed.answer_cn != null ? String(proposed.answer_cn).trim() : '';
+    const en = proposed.answer_en != null ? String(proposed.answer_en).trim() : '';
+    return Boolean(cn || en);
+}
+
+/**
+ * Rewrite history.correct for every attempt of this question against current bank answers.
+ * Idempotent.
+ */
+async function rescoreHistoryForQuestion(pool, questionId) {
+    const empty = { updated: 0, correctTrue: 0, correctFalse: 0, skipped: true, question_id: null };
+    const qid = Number(questionId);
+    if (!pool || !Number.isInteger(qid)) return empty;
+
+    const qRes = await pool.query(
+        `SELECT answer_cn, answer_en FROM questions WHERE id = $1 LIMIT 1`,
+        [qid]
+    );
+    const question = qRes && qRes.rows && qRes.rows[0];
+    if (!question) return { ...empty, question_id: qid };
+
+    const hRes = await pool.query(
+        `SELECT id, given_answer, correct FROM history WHERE question_id = $1`,
+        [qid]
+    );
+    const rows = (hRes && hRes.rows) || [];
+    const trueIds = [];
+    const falseIds = [];
+    let correctTrue = 0;
+    let correctFalse = 0;
+    let updated = 0;
+    for (const row of rows) {
+        const next = historyAnswerIsCorrect(row.given_answer, question.answer_cn, question.answer_en);
+        if (next) correctTrue += 1;
+        else correctFalse += 1;
+        if (Boolean(row.correct) === next) continue;
+        updated += 1;
+        if (next) trueIds.push(row.id);
+        else falseIds.push(row.id);
+    }
+    if (trueIds.length) {
+        await pool.query(
+            `UPDATE history SET correct = $1 WHERE id = ANY($2::int[])`,
+            [true, trueIds]
+        );
+    }
+    if (falseIds.length) {
+        await pool.query(
+            `UPDATE history SET correct = $1 WHERE id = ANY($2::int[])`,
+            [false, falseIds]
+        );
+    }
+    return {
+        updated,
+        correctTrue,
+        correctFalse,
+        skipped: false,
+        question_id: qid,
+    };
 }
 
 function parseMetadata(raw) {
@@ -328,11 +397,22 @@ async function applyProposedFix(pool, questionId, proposed) {
     setIf('explanation_cn', proposed.explanation_cn);
     setIf('explanation_en', proposed.explanation_en);
     if (!fields.length) return false;
+    const wroteAnswer = proposedWritesAnswer(proposed);
     params.push(questionId);
     await pool.query(
         `UPDATE questions SET ${fields.join(', ')} WHERE id = $${params.length}`,
         params
     );
+    if (wroteAnswer) {
+        try {
+            await rescoreHistoryForQuestion(pool, questionId);
+        } catch (e) {
+            console.error(
+                '[user-feedback-triage] history rescore failed:',
+                e && e.message ? e.message : e
+            );
+        }
+    }
     return true;
 }
 
@@ -1033,6 +1113,8 @@ async function triageUserFeedbackBatch(pool, deps = {}, {
 module.exports = {
     normalizeAnswerText,
     answersMatch,
+    historyAnswerIsCorrect,
+    rescoreHistoryForQuestion,
     computeMathResult,
     canAutoApplyMath,
     canAutoApplyLlm,
