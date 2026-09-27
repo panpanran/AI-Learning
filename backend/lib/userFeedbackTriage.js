@@ -176,6 +176,37 @@ function findMatchingOption(options, expected) {
     return null;
 }
 
+/**
+ * Map a child's given answer onto bank answers for both languages.
+ * Bilingual options are paired by index, so a zh match yields the en option at the same slot.
+ * Returns { answer_cn, answer_en } or null when the given answer matches no option.
+ */
+function resolveGivenAnswerForOptions(options, given) {
+    const g = String(given || '').trim();
+    if (!g) return null;
+    if (!options) return { answer_cn: g, answer_en: g };
+
+    const opts = normalizeOptionsObject(options);
+    const zh = opts && Array.isArray(opts.zh) ? opts.zh.map(String) : null;
+    const en = opts && Array.isArray(opts.en) ? opts.en.map(String) : null;
+    if (zh || en) {
+        const zhHit = zh ? findMatchingOption(zh, g) : null;
+        if (zhHit != null) {
+            const i = zh.indexOf(zhHit);
+            return { answer_cn: zhHit, answer_en: en && en[i] != null ? en[i] : zhHit };
+        }
+        const enHit = en ? findMatchingOption(en, g) : null;
+        if (enHit != null) {
+            const i = en.indexOf(enHit);
+            return { answer_cn: zh && zh[i] != null ? zh[i] : enHit, answer_en: enHit };
+        }
+        return null;
+    }
+
+    const opt = findMatchingOption(options, g);
+    return opt != null ? { answer_cn: opt, answer_en: opt } : null;
+}
+
 function safeParseJsonObject(text) {
     const raw = String(text || '').trim();
     if (!raw) return null;
@@ -495,23 +526,18 @@ async function decideUserFeedback(pool, {
     // Parent override: if AI only left a reason, Accept can apply the child's given answer
     // when it matches an existing option.
     if (!hasCae) {
-        const given = String(feedback.given_answer || '').trim();
-        if (given) {
-            const opt = findMatchingOption(question.options, given);
-            if (opt || !question.options) {
-                const answerText = opt || given;
-                proposed = {
-                    ...(proposed || {}),
-                    answer_cn: answerText,
-                    answer_en: answerText,
-                    reason: (proposed && proposed.reason)
-                        ? `${proposed.reason}; parent accepted given answer`
-                        : 'Parent accepted given answer from feedback',
-                    source: 'human_given_answer',
-                    confidence: 1,
-                };
-                hasCae = true;
-            }
+        const answers = resolveGivenAnswerForOptions(question.options, feedback.given_answer);
+        if (answers) {
+            proposed = {
+                ...(proposed || {}),
+                ...answers,
+                reason: (proposed && proposed.reason)
+                    ? `${proposed.reason}; parent accepted given answer`
+                    : 'Parent accepted given answer from feedback',
+                source: 'human_given_answer',
+                confidence: 1,
+            };
+            hasCae = true;
         }
     }
 
@@ -1119,6 +1145,7 @@ module.exports = {
     canAutoApplyMath,
     canAutoApplyLlm,
     proposedAnswersConsistentWithOptions,
+    resolveGivenAnswerForOptions,
     hasCaeChange,
     buildMathProposedFix,
     applyProposedFix,

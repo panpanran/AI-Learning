@@ -10,6 +10,8 @@ const {
     historyAnswerIsCorrect,
     rescoreHistoryForQuestion,
     applyProposedFix,
+    resolveGivenAnswerForOptions,
+    decideUserFeedback,
 } = require('../lib/userFeedbackTriage');
 
 describe('userFeedbackTriage math helpers', () => {
@@ -177,5 +179,80 @@ describe('history rescore after bank answer fix', () => {
         expect(pool.rows[0].correct).toBe(false);
         expect(pool.calls.some((c) => /FROM history/i.test(c.sql))).toBe(false);
         expect(pool.calls.some((c) => /UPDATE history/i.test(c.sql))).toBe(false);
+    });
+});
+
+function makeDecidePool({ question, feedback }) {
+    const calls = [];
+    const pool = {
+        calls,
+        async query(sql, params) {
+            const s = String(sql).replace(/\s+/g, ' ');
+            calls.push({ sql: s, params });
+            if (/FROM user_question_feedback WHERE id/i.test(s)) return { rows: [{ ...feedback }] };
+            if (/UPDATE user_question_feedback/i.test(s)) return { rows: [], rowCount: 1 };
+            if (/UPDATE questions SET/i.test(s)) return { rows: [], rowCount: 1 };
+            if (/FROM questions WHERE id/i.test(s)) return { rows: [{ ...question }] };
+            if (/FROM history WHERE question_id/i.test(s)) return { rows: [] };
+            throw new Error(`unexpected query: ${s}`);
+        },
+    };
+    return pool;
+}
+
+describe('accept with the given answer on bilingual options', () => {
+    const fruitQuestion = {
+        id: 7,
+        answer_cn: '苹果',
+        answer_en: 'apple',
+        options: { zh: ['苹果', '香蕉', '橙子'], en: ['apple', 'banana', 'orange'] },
+    };
+
+    it('pairs a zh given answer with the en option at the same index', () => {
+        expect(resolveGivenAnswerForOptions(fruitQuestion.options, '香蕉'))
+            .toEqual({ answer_cn: '香蕉', answer_en: 'banana' });
+    });
+
+    it('pairs an en given answer with the zh option at the same index', () => {
+        expect(resolveGivenAnswerForOptions(fruitQuestion.options, 'orange'))
+            .toEqual({ answer_cn: '橙子', answer_en: 'orange' });
+    });
+
+    it('returns null when the given answer matches no option', () => {
+        expect(resolveGivenAnswerForOptions(fruitQuestion.options, '西瓜')).toBeNull();
+    });
+
+    it('keeps the given answer when the question has no options', () => {
+        expect(resolveGivenAnswerForOptions(null, '42')).toEqual({ answer_cn: '42', answer_en: '42' });
+    });
+
+    it('decide accept applies a zh given answer when zh and en options differ', async () => {
+        const pool = makeDecidePool({
+            question: fruitQuestion,
+            feedback: { id: 9, user_id: 1, question_id: 7, status: 'acknowledged', given_answer: '香蕉', proposed_fix: { reason: 'x' } },
+        });
+        const out = await decideUserFeedback(pool, { feedbackId: 9, userIds: [1], action: 'accept' });
+        expect(out.status).toBe('applied');
+        const update = pool.calls.find((c) => /UPDATE questions SET/i.test(c.sql));
+        expect(update.params).toContain('香蕉');
+        expect(update.params).toContain('banana');
+    });
+
+    it('decide accept still applies numeric answers shared by both languages', async () => {
+        const pool = makeDecidePool({
+            question: { id: 8, answer_cn: '500个', answer_en: '500', options: { zh: ['500个', '600个'], en: ['500', '600'] } },
+            feedback: { id: 10, user_id: 1, question_id: 8, status: 'open', given_answer: '600个', proposed_fix: null },
+        });
+        const out = await decideUserFeedback(pool, { feedbackId: 10, userIds: [1], action: 'accept' });
+        expect(out.status).toBe('applied');
+    });
+
+    it('decide accept still rejects a given answer outside the options', async () => {
+        const pool = makeDecidePool({
+            question: fruitQuestion,
+            feedback: { id: 11, user_id: 1, question_id: 7, status: 'acknowledged', given_answer: '西瓜', proposed_fix: null },
+        });
+        await expect(decideUserFeedback(pool, { feedbackId: 11, userIds: [1], action: 'accept' }))
+            .rejects.toMatchObject({ status: 400 });
     });
 });

@@ -74,16 +74,28 @@ function optionTexts(options: unknown): string[] {
     return out
 }
 
+// Must mirror findMatchingOption in backend/lib/userFeedbackTriage.js, or Accept is enabled but returns 400.
+function normalizeAnswerText(s: string) {
+    return String(s || '').trim().toLowerCase().replace(/,/g, '').replace(/\s+/g, ' ')
+}
+
+function optionMatchesGiven(option: string, given: string) {
+    const x = normalizeAnswerText(option)
+    const y = normalizeAnswerText(given)
+    if (!x || !y) return false
+    if (x === y) return true
+    const nx = Number(x)
+    const ny = Number(y)
+    if (Number.isFinite(nx) && Number.isFinite(ny) && nx === ny) return true
+    return x.startsWith(y) || y.startsWith(x) || x.includes(y)
+}
+
 function canAcceptGivenAnswer(item: FeedbackItem): boolean {
     const given = String(item.given_answer || '').trim()
     if (!given) return false
-    const texts = optionTexts(item.question && item.question.options)
-    if (!texts.length) return Boolean(given)
-    const g = given.toLowerCase()
-    return texts.some((t) => {
-        const x = String(t).trim().toLowerCase()
-        return x === g || x.includes(g) || g.includes(x)
-    })
+    const options = item.question && item.question.options
+    if (!options) return true
+    return optionTexts(options).some((t) => optionMatchesGiven(t, given))
 }
 
 function isPending(status: string) {

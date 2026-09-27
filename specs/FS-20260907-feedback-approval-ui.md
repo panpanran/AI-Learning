@@ -12,7 +12,7 @@
 | **Packages** | frontend, backend, agents (stub) |
 | **Created** | 2026-09-07 |
 | **Ready** | 2026-09-07 |
-| **Implemented** | 2026-09-07 |
+| **Implemented** | 2026-09-07; fix 2026-09-27 (AC-5) |
 
 ## 1. Intent
 
@@ -27,12 +27,14 @@
 2. **AC-2** — Given Accept on an item with proposed CAE fields, When decide runs, Then `questions` content/answer/explanation update and status=`applied`.
 3. **AC-3** — Given Reject, When decide runs, Then status=`dismissed` and questions unchanged.
 4. **AC-4** — Given `/feedback` page, When opened while logged in, Then pending list renders with Accept/Reject/Re-analyze actions.
+5. **AC-5** (fix 2026-09-27, human said proceed in chat) — Given no CAE proposal and a `given_answer` that matches a zh or en option whose other-language text differs, When Accept runs, Then `answer_cn` / `answer_en` are set to the paired options at the same index and status=`applied` (previously 400 "Proposed answer is not among existing options"). The UI enables Accept for a given answer only when the backend matcher would accept it.
 
 ## 5. Files
 
 | Path | Change |
 |------|--------|
-| `backend/lib/userFeedbackTriage.js` | `decideUserFeedback`, `listUserFeedback`, export `applyProposedFix` |
+| `backend/lib/userFeedbackTriage.js` | `decideUserFeedback`, `listUserFeedback`, export `applyProposedFix`; AC-5 `resolveGivenAnswerForOptions` |
+| `backend/test/userFeedbackTriage.test.js` | AC-5 tests |
 | `backend/index.js` | GET list, POST decide, POST reanalyze |
 | `frontend/src/FeedbackReview.tsx` | New page |
 | `frontend/src/main.tsx` + vite SPA routes | `/feedback` |
@@ -44,6 +46,7 @@
 - List defaults to `acknowledged,open`; ownership via JWT + username-merged user ids.
 - Accept applies only CAE fields from `proposed_fix`; Reject → `dismissed`; Re-analyze resets to `open` and awaits `triageUserFeedbackById`.
 - Agents endpoint returns `not_implemented` (Express remains triage engine).
+- AC-5: Accept via given answer pairs bilingual options by index (`resolveGivenAnswerForOptions`); falls back to the matched text when the other list is missing. `FeedbackReview.canAcceptGivenAnswer` mirrors the backend `findMatchingOption` rules.
 
 ## 7. AC map
 
@@ -53,8 +56,11 @@
 | AC-2 | Code: `decideUserFeedback` accept path | pass |
 | AC-3 | Code: reject → dismissed | pass |
 | AC-4 | Code: `FeedbackReview` + `/feedback` route + nav | pass |
+| AC-5 | `userFeedbackTriage.test.js` > "accept with the given answer on bilingual options" (7 tests) | pass |
 
 ## 8. Evidence
+
+- 2026-09-27 AC-5: reproduced before fix with a mock pool (zh `香蕉` vs en `banana` → `ERR 400 Proposed answer is not among existing options`). After fix: `backend> npm test` 21/21 pass; `frontend> npm run build` succeeds.
 
 - Local: module load of `userFeedbackTriage` exports; routes wired in `index.js`.
 - Manual: open `/feedback` after deploy; Accept/Reject on an `acknowledged` row.
