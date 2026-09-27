@@ -254,6 +254,11 @@ async function ensureUserQuestionFeedbackTable(pool) {
     )`);
     try {
         await pool.query(
+            'ALTER TABLE user_question_feedback ADD COLUMN IF NOT EXISTS original_snapshot JSONB'
+        );
+    } catch { /* ignore */ }
+    try {
+        await pool.query(
             'CREATE INDEX IF NOT EXISTS user_question_feedback_q_idx ON user_question_feedback(question_id, created_at DESC)'
         );
     } catch { /* ignore */ }

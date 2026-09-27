@@ -17,6 +17,16 @@ type ProposedFix = {
     [key: string]: unknown
 }
 
+type QuestionSnapshot = {
+    content_cn: string | null
+    content_en: string | null
+    answer_cn: string | null
+    answer_en: string | null
+    explanation_cn: string | null
+    explanation_en: string | null
+    options: unknown
+}
+
 type FeedbackItem = {
     id: number
     question_id: number | null
@@ -26,22 +36,59 @@ type FeedbackItem = {
     status: string
     proposed_fix: ProposedFix | null
     created_at?: string
-    question: {
-        content_cn: string
-        content_en: string
-        answer_cn: string
-        answer_en: string
-        explanation_cn: string
-        explanation_en: string
-        options: unknown
-    }
+    original: QuestionSnapshot | null
+    question: QuestionSnapshot
 }
 
 const STATUS_FILTERS = ['all', 'open', 'acknowledged', 'applied', 'dismissed'] as const
 type StatusFilter = typeof STATUS_FILTERS[number]
 
-function pickLang(lang: 'zh' | 'en', cn: string, en: string) {
-    return lang === 'zh' ? (cn || en) : (en || cn)
+function pickLang(lang: 'zh' | 'en', cn: string | null, en: string | null) {
+    return lang === 'zh' ? (cn || en || '') : (en || cn || '')
+}
+
+function optionsForLang(options: unknown, lang: 'zh' | 'en'): string[] {
+    if (!options) return []
+    let parsed: any = options
+    if (typeof options === 'string') {
+        try { parsed = JSON.parse(options) } catch { return [] }
+    }
+    if (Array.isArray(parsed)) return parsed.map(String)
+    if (parsed && typeof parsed === 'object') {
+        const primary = lang === 'zh' ? (parsed.zh || parsed.cn) : parsed.en
+        const fallback = lang === 'zh' ? parsed.en : (parsed.zh || parsed.cn)
+        const list = Array.isArray(primary) ? primary : (Array.isArray(fallback) ? fallback : [])
+        return list.map(String)
+    }
+    return []
+}
+
+function QuestionBlock({ title, q, lang, t, hint }: {
+    title: string
+    q: QuestionSnapshot
+    lang: 'zh' | 'en'
+    t: (key: string) => string
+    hint?: string
+}) {
+    const opts = optionsForLang(q.options, lang)
+    return (
+        <div>
+            <div className="meta">{title}</div>
+            {hint ? <div className="meta" style={{ fontStyle: 'italic' }}>{hint}</div> : null}
+            <div style={{ fontWeight: 600 }}>{pickLang(lang, q.content_cn, q.content_en) || '—'}</div>
+            {opts.length ? (
+                <div className="meta" style={{ marginTop: 4 }}>
+                    {t('feedback_review_options')}: {opts.join(' / ')}
+                </div>
+            ) : null}
+            <div className="meta" style={{ marginTop: 4 }}>
+                {t('correct_answer')}: {pickLang(lang, q.answer_cn, q.answer_en) || '—'}
+            </div>
+            <div className="meta">
+                {t('explanation')}: {pickLang(lang, q.explanation_cn, q.explanation_en) || '—'}
+            </div>
+        </div>
+    )
 }
 
 function hasProposedCae(p: ProposedFix | null | undefined) {
@@ -156,13 +203,14 @@ export default function FeedbackReview() {
         setBusyId(id)
         setNote('')
         try {
-            await API.post(
+            const r = await API.post(
                 `/api/user-feedback/${id}/decide`,
                 { action },
                 { headers: { Authorization: `Bearer ${token}` } }
             )
             await load()
-            setNote(action === 'accept' ? t('feedback_review_accepted') : t('feedback_review_rejected'))
+            if (action === 'accept') setNote(t('feedback_review_accepted'))
+            else setNote(r?.data?.reverted ? t('feedback_review_reverted') : t('feedback_review_rejected'))
         } catch (err: any) {
             const msg = err?.response?.data?.error || t('feedback_review_action_failed')
             setNote(String(msg))
@@ -349,20 +397,22 @@ export default function FeedbackReview() {
                                 </div>
 
                                 <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
-                                    <div>
-                                        <div className="meta">{t('feedback_review_current')}</div>
-                                        <div style={{ fontWeight: 600 }}>
-                                            {pickLang(lang, q.content_cn, q.content_en) || '—'}
-                                        </div>
-                                        <div className="meta" style={{ marginTop: 4 }}>
-                                            {t('correct_answer')}: {pickLang(lang, q.answer_cn, q.answer_en) || '—'}
-                                        </div>
-                                        <div className="meta">
-                                            {t('explanation')}: {pickLang(lang, q.explanation_cn, q.explanation_en) || '—'}
-                                        </div>
-                                    </div>
+                                    {item.original ? (
+                                        <>
+                                            <QuestionBlock title={t('feedback_review_original')} q={item.original} lang={lang} t={t} />
+                                            <QuestionBlock title={t('feedback_review_current')} q={q} lang={lang} t={t} />
+                                        </>
+                                    ) : (
+                                        <QuestionBlock
+                                            title={t('feedback_review_current')}
+                                            q={q}
+                                            lang={lang}
+                                            t={t}
+                                            hint={item.status === 'applied' ? t('feedback_review_no_original') : undefined}
+                                        />
+                                    )}
 
-                                    <div>
+                                    {item.status === 'applied' ? null : <div>
                                         <div className="meta">{t('feedback_review_proposed')}</div>
                                         {hasProposedCae(p) || (p && p.reason) ? (
                                             <>
@@ -388,7 +438,7 @@ export default function FeedbackReview() {
                                         ) : (
                                             <div className="meta">{t('feedback_review_no_proposal')}</div>
                                         )}
-                                    </div>
+                                    </div>}
                                 </div>
 
                                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
@@ -396,43 +446,51 @@ export default function FeedbackReview() {
                                         <button
                                             type="button"
                                             className="btn"
-                                            disabled={busy}
-                                            onClick={() => reanalyze(item.id)}
+                                            disabled={busy || !item.original}
+                                            onClick={() => decide(item.id, 'reject')}
+                                            title={item.original ? undefined : t('feedback_review_reject_no_original')}
                                         >
-                                            {t('feedback_review_reanalyze')}
+                                            {t('feedback_review_reject_revert')}
                                         </button>
                                     ) : (
-                                        <>
-                                            <button
-                                                type="button"
-                                                className={canAccept ? 'btn primary' : 'btn'}
-                                                disabled={busy || !canAccept}
-                                                onClick={() => decide(item.id, 'accept')}
-                                                title={acceptHint || undefined}
-                                            >
-                                                {t('feedback_review_accept')}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="btn"
-                                                disabled={busy || !pending}
-                                                onClick={() => decide(item.id, 'reject')}
-                                            >
-                                                {t('feedback_review_reject')}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="btn"
-                                                disabled={busy}
-                                                onClick={() => reanalyze(item.id)}
-                                            >
-                                                {t('feedback_review_reanalyze')}
-                                            </button>
-                                        </>
+                                        <button
+                                            type="button"
+                                            className={canAccept ? 'btn primary' : 'btn'}
+                                            disabled={busy || !canAccept}
+                                            onClick={() => decide(item.id, 'accept')}
+                                            title={acceptHint || undefined}
+                                        >
+                                            {t('feedback_review_accept')}
+                                        </button>
                                     )}
+                                    {pending ? (
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            disabled={busy}
+                                            onClick={() => decide(item.id, 'reject')}
+                                        >
+                                            {t('feedback_review_reject')}
+                                        </button>
+                                    ) : null}
+                                    {item.status === 'dismissed' ? (
+                                        <span className="meta" style={{ alignSelf: 'center' }}>
+                                            {t('feedback_review_already_rejected')}
+                                        </span>
+                                    ) : null}
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        disabled={busy}
+                                        onClick={() => reanalyze(item.id)}
+                                    >
+                                        {t('feedback_review_reanalyze')}
+                                    </button>
                                 </div>
                                 {item.status === 'applied' ? (
-                                    <div className="meta" style={{ marginTop: 8 }}>{t('feedback_review_accept_already')}</div>
+                                    <div className="meta" style={{ marginTop: 8 }}>
+                                        {item.original ? t('feedback_review_accept_already') : t('feedback_review_reject_no_original')}
+                                    </div>
                                 ) : (acceptHint ? (
                                     <div className="meta" style={{ marginTop: 8 }}>{acceptHint}</div>
                                 ) : null)}

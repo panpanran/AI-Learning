@@ -447,6 +447,62 @@ async function applyProposedFix(pool, questionId, proposed) {
     return true;
 }
 
+const SNAPSHOT_FIELDS = [
+    'content_cn', 'content_en', 'answer_cn', 'answer_en', 'explanation_cn', 'explanation_en', 'options',
+];
+
+function pickQuestionSnapshot(question) {
+    const out = {};
+    for (const k of SNAPSHOT_FIELDS) out[k] = question && question[k] != null ? question[k] : null;
+    return out;
+}
+
+/**
+ * Store the pre-fix question on the feedback row (first apply only), then apply the fix.
+ * Re-applies keep the earliest snapshot so Reject restores what the child actually saw.
+ */
+async function applyFixWithSnapshot(pool, feedbackId, questionId, proposed) {
+    const qRes = await pool.query(
+        `SELECT id, content_cn, content_en, answer_cn, answer_en, explanation_cn, explanation_en, options
+         FROM questions WHERE id = $1 LIMIT 1`,
+        [questionId]
+    );
+    const question = qRes && qRes.rows && qRes.rows[0];
+    if (question) {
+        await pool.query(
+            `UPDATE user_question_feedback
+             SET original_snapshot = $2::jsonb
+             WHERE id = $1 AND original_snapshot IS NULL`,
+            [feedbackId, JSON.stringify(pickQuestionSnapshot(question))]
+        );
+    }
+    return applyProposedFix(pool, questionId, proposed);
+}
+
+// Writes every CAE field verbatim (including empty ones) so fields the fix added are cleared too.
+async function restoreQuestionFromSnapshot(pool, questionId, snap) {
+    await pool.query(
+        `UPDATE questions
+         SET content_cn = $1, content_en = $2, answer_cn = $3, answer_en = $4,
+             explanation_cn = $5, explanation_en = $6
+         WHERE id = $7`,
+        [
+            snap.content_cn ?? null, snap.content_en ?? null,
+            snap.answer_cn ?? null, snap.answer_en ?? null,
+            snap.explanation_cn ?? null, snap.explanation_en ?? null,
+            questionId,
+        ]
+    );
+    try {
+        await rescoreHistoryForQuestion(pool, questionId);
+    } catch (e) {
+        console.error(
+            '[user-feedback-triage] history rescore after revert failed:',
+            e && e.message ? e.message : e
+        );
+    }
+}
+
 /**
  * Human decision on a triage proposal.
  * action: accept | reject
@@ -482,11 +538,28 @@ async function decideUserFeedback(pool, {
         err.status = 404;
         throw err;
     }
-    if (feedback.status === 'applied' || feedback.status === 'dismissed') {
-        if (act === 'reject') {
-            return { id, status: feedback.status, skipped: true };
+    if (act === 'reject' && feedback.status === 'dismissed') {
+        return { id, status: feedback.status, skipped: true };
+    }
+
+    if (act === 'reject' && feedback.status === 'applied') {
+        const snap = feedback.original_snapshot && typeof feedback.original_snapshot === 'object'
+            ? feedback.original_snapshot
+            : null;
+        if (!snap) {
+            const err = new Error('No original snapshot for this fix; cannot restore.');
+            err.status = 409;
+            throw err;
         }
-        // accept on finalized: allow re-apply if CAE proposal exists
+        await restoreQuestionFromSnapshot(pool, feedback.question_id, snap);
+        await pool.query(
+            `UPDATE user_question_feedback
+             SET status = 'dismissed',
+                 proposed_fix = COALESCE(proposed_fix, '{}'::jsonb) || $2::jsonb
+             WHERE id = $1`,
+            [id, JSON.stringify({ human_decision: 'reject', reverted: true })]
+        );
+        return { id, status: 'dismissed', reverted: true, question_id: feedback.question_id };
     }
 
     if (act === 'reject') {
@@ -556,7 +629,7 @@ async function decideUserFeedback(pool, {
         }
     }
 
-    await applyProposedFix(pool, question.id, proposed);
+    await applyFixWithSnapshot(pool, id, question.id, proposed);
     await pool.query(
         `UPDATE user_question_feedback
          SET status = 'applied',
@@ -595,6 +668,7 @@ async function listUserFeedback(pool, {
     const r = await pool.query(
         `SELECT f.id, f.user_id, f.question_id, f.knowledge_point_id, f.grade_id, f.subject_id,
                 f.category, f.comment, f.given_answer, f.status, f.proposed_fix, f.created_at, f.applied_at,
+                f.original_snapshot,
                 q.content_cn, q.content_en, q.answer_cn, q.answer_en,
                 q.explanation_cn, q.explanation_en, q.options
          FROM user_question_feedback f
@@ -620,6 +694,9 @@ async function listUserFeedback(pool, {
         proposed_fix: row.proposed_fix || null,
         created_at: row.created_at,
         applied_at: row.applied_at,
+        original: row.original_snapshot && typeof row.original_snapshot === 'object'
+            ? pickQuestionSnapshot(row.original_snapshot)
+            : null,
         question: {
             content_cn: row.content_cn || '',
             content_en: row.content_en || '',
@@ -741,7 +818,7 @@ async function applyAgentsTriageResults(pool, items) {
                 || proposed.answer_cn || proposed.answer_en
                 || proposed.explanation_cn || proposed.explanation_en;
             if (hasCae) {
-                await applyProposedFix(pool, questionId, proposed);
+                await applyFixWithSnapshot(pool, id, questionId, proposed);
                 await pool.query(
                     `UPDATE user_question_feedback
                      SET status = 'applied',
@@ -960,7 +1037,7 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
             if (e) proposed.answer_en = e;
         }
 
-        await applyProposedFix(pool, question.id, proposed);
+        await applyFixWithSnapshot(pool, id, question.id, proposed);
         await pool.query(
             `UPDATE user_question_feedback
              SET status = 'applied',
@@ -1149,6 +1226,7 @@ module.exports = {
     hasCaeChange,
     buildMathProposedFix,
     applyProposedFix,
+    applyFixWithSnapshot,
     triageUserFeedbackById,
     queueUserFeedbackTriage,
     triageOpenUserFeedback,

@@ -4085,7 +4085,7 @@ app.post('/api/user-feedback/:id/decide', async (req, res) => {
         return res.json({ ok: true, ...result });
     } catch (e) {
         const status = e && e.status ? Number(e.status) : 0;
-        if (status === 400 || status === 404) {
+        if (status === 400 || status === 404 || status === 409) {
             return res.status(status).json({ error: e.message || 'Bad request' });
         }
         if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {

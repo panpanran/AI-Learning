@@ -12,6 +12,7 @@ const {
     applyProposedFix,
     resolveGivenAnswerForOptions,
     decideUserFeedback,
+    listUserFeedback,
 } = require('../lib/userFeedbackTriage');
 
 describe('userFeedbackTriage math helpers', () => {
@@ -254,5 +255,83 @@ describe('accept with the given answer on bilingual options', () => {
         });
         await expect(decideUserFeedback(pool, { feedbackId: 11, userIds: [1], action: 'accept' }))
             .rejects.toMatchObject({ status: 400 });
+    });
+});
+
+describe('original snapshot and reject-revert (FS-20260927-feedback-original-and-revert)', () => {
+    const original = {
+        id: 7,
+        content_cn: '原题干',
+        content_en: 'original stem',
+        answer_cn: '苹果',
+        answer_en: 'apple',
+        explanation_cn: '',
+        explanation_en: '',
+        options: { zh: ['苹果', '香蕉'], en: ['apple', 'banana'] },
+    };
+
+    it('accept stores the pre-fix question before updating it, guarded by IS NULL (AC-1, AC-2)', async () => {
+        const pool = makeDecidePool({
+            question: original,
+            feedback: { id: 20, user_id: 1, question_id: 7, status: 'acknowledged', given_answer: '香蕉', proposed_fix: null },
+        });
+        await decideUserFeedback(pool, { feedbackId: 20, userIds: [1], action: 'accept' });
+        const snapIdx = pool.calls.findIndex((c) => /SET original_snapshot/i.test(c.sql));
+        const updIdx = pool.calls.findIndex((c) => /UPDATE questions SET/i.test(c.sql));
+        expect(snapIdx).toBeGreaterThanOrEqual(0);
+        expect(snapIdx).toBeLessThan(updIdx);
+        expect(pool.calls[snapIdx].sql).toMatch(/original_snapshot IS NULL/i);
+        const snap = JSON.parse(pool.calls[snapIdx].params[1]);
+        expect(snap.answer_cn).toBe('苹果');
+        expect(snap.answer_en).toBe('apple');
+        expect(snap.options).toEqual(original.options);
+    });
+
+    it('list returns original_snapshot as original (AC-3)', async () => {
+        const pool = {
+            async query() {
+                return {
+                    rows: [{
+                        id: 20, user_id: 1, question_id: 7, status: 'applied',
+                        original_snapshot: { answer_cn: '苹果', answer_en: 'apple', options: original.options },
+                        answer_cn: '香蕉', answer_en: 'banana',
+                    }, {
+                        id: 21, user_id: 1, question_id: 7, status: 'applied', original_snapshot: null,
+                    }],
+                };
+            },
+        };
+        const items = await listUserFeedback(pool, { userIds: [1] });
+        expect(items[0].original.answer_cn).toBe('苹果');
+        expect(items[0].question.answer_cn).toBe('香蕉');
+        expect(items[1].original).toBeNull();
+    });
+
+    it('reject on applied restores every CAE field from the snapshot and dismisses (AC-4)', async () => {
+        const pool = makeDecidePool({
+            question: { ...original, answer_cn: '香蕉', answer_en: 'banana', explanation_cn: '新解析' },
+            feedback: {
+                id: 22, user_id: 1, question_id: 7, status: 'applied', given_answer: '香蕉',
+                proposed_fix: { answer_cn: '香蕉' },
+                original_snapshot: { ...original },
+            },
+        });
+        const out = await decideUserFeedback(pool, { feedbackId: 22, userIds: [1], action: 'reject' });
+        expect(out).toMatchObject({ status: 'dismissed', reverted: true });
+        const restore = pool.calls.find((c) => /UPDATE questions SET content_cn = \$1/i.test(c.sql));
+        expect(restore.params).toEqual(['原题干', 'original stem', '苹果', 'apple', '', '', 7]);
+        expect(pool.calls.some((c) => /FROM history WHERE question_id/i.test(c.sql))).toBe(true);
+        const status = pool.calls.find((c) => /SET status = 'dismissed'/i.test(c.sql));
+        expect(JSON.parse(status.params[1])).toMatchObject({ human_decision: 'reject', reverted: true });
+    });
+
+    it('reject on applied without a snapshot returns 409 and writes nothing (AC-5)', async () => {
+        const pool = makeDecidePool({
+            question: original,
+            feedback: { id: 23, user_id: 1, question_id: 7, status: 'applied', proposed_fix: {}, original_snapshot: null },
+        });
+        await expect(decideUserFeedback(pool, { feedbackId: 23, userIds: [1], action: 'reject' }))
+            .rejects.toMatchObject({ status: 409 });
+        expect(pool.calls.some((c) => /^\s*UPDATE/i.test(c.sql))).toBe(false);
     });
 });
