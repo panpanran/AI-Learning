@@ -104,6 +104,7 @@ def persist_question(
                     knowledge_point_id = EXCLUDED.knowledge_point_id,
                     grade_id = EXCLUDED.grade_id,
                     subject_id = EXCLUDED.subject_id
+                WHERE questions.retired_at IS NULL
                 RETURNING id
                 """,
                 (
@@ -124,4 +125,3 @@ def persist_question(
             )
             row = cur.fetchone()
             return int(row["id"]) if row and row.get("id") is not None else None
-                WHERE questions.retired_at IS NULL

@@ -788,8 +788,8 @@ function registerDiagnosticRoutes({ app, deps }) {
                                      knowledge_point_id = EXCLUDED.knowledge_point_id,
                                      grade_id = EXCLUDED.grade_id,
                                      subject_id = EXCLUDED.subject_id
-                                 RETURNING id`,
                                  WHERE questions.retired_at IS NULL
+                                 RETURNING id`,
                                 [
                                     q.content_cn,
                                     q.content_en,
