@@ -669,6 +669,88 @@ async function decideUserFeedback(pool, {
     return { id, status: 'applied', question_id: question.id };
 }
 
+const RETIRE_ALLOWED_USERNAMES = String(process.env.RETIRE_ALLOWED_USERNAMES || 'maxpan,panpanr')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+function canRetireQuestions(username) {
+    const u = String(username || '').trim().toLowerCase();
+    return Boolean(u) && RETIRE_ALLOWED_USERNAMES.includes(u);
+}
+
+async function loadOwnedFeedback(pool, feedbackId, userIds) {
+    const id = Number(feedbackId);
+    const ids = (Array.isArray(userIds) ? userIds : []).map(Number).filter(Number.isInteger);
+    if (!pool || !Number.isInteger(id) || !ids.length) {
+        const err = new Error('feedback not found');
+        err.status = 404;
+        throw err;
+    }
+    const r = await pool.query(
+        `SELECT id, question_id, status, proposed_fix FROM user_question_feedback
+         WHERE id = $1 AND user_id = ANY($2::int[]) LIMIT 1`,
+        [id, ids]
+    );
+    const feedback = r.rows[0];
+    if (!feedback || feedback.question_id == null) {
+        const err = new Error('feedback not found');
+        err.status = 404;
+        throw err;
+    }
+    return feedback;
+}
+
+function assertCanRetire(username) {
+    if (!canRetireQuestions(username)) {
+        const err = new Error('Not allowed to retire questions');
+        err.status = 403;
+        throw err;
+    }
+}
+
+async function retireQuestionForFeedback(pool, { feedbackId, userIds, username, reason }) {
+    assertCanRetire(username);
+    const feedback = await loadOwnedFeedback(pool, feedbackId, userIds);
+    const why = reason != null && String(reason).trim()
+        ? String(reason).trim().slice(0, 500)
+        : 'Retired from feedback review';
+    const qRes = await pool.query(
+        `UPDATE questions
+         SET retired_at = COALESCE(retired_at, NOW()),
+             retired_reason = COALESCE(retired_reason, $2),
+             retired_by_feedback_id = COALESCE(retired_by_feedback_id, $3)
+         WHERE id = $1
+         RETURNING id, retired_at`,
+        [feedback.question_id, why, feedback.id]
+    );
+    if (!qRes.rows[0]) {
+        const err = new Error('question not found');
+        err.status = 404;
+        throw err;
+    }
+    await pool.query(
+        `UPDATE user_question_feedback
+         SET status = 'dismissed',
+             proposed_fix = COALESCE(proposed_fix, '{}'::jsonb) || $2::jsonb
+         WHERE id = $1`,
+        [feedback.id, JSON.stringify({ human_decision: 'retire' })]
+    );
+    return { question_id: Number(feedback.question_id), retired_at: qRes.rows[0].retired_at };
+}
+
+async function unretireQuestionForFeedback(pool, { feedbackId, userIds, username }) {
+    assertCanRetire(username);
+    const feedback = await loadOwnedFeedback(pool, feedbackId, userIds);
+    await pool.query(
+        `UPDATE questions
+         SET retired_at = NULL, retired_reason = NULL, retired_by_feedback_id = NULL
+         WHERE id = $1`,
+        [feedback.question_id]
+    );
+    return { question_id: Number(feedback.question_id) };
+}
+
 async function listUserFeedback(pool, {
     userIds,
     status = 'all',
@@ -698,7 +780,7 @@ async function listUserFeedback(pool, {
                 f.category, f.comment, f.given_answer, f.status, f.proposed_fix, f.created_at, f.applied_at,
                 f.original_snapshot,
                 q.content_cn, q.content_en, q.answer_cn, q.answer_en,
-                q.explanation_cn, q.explanation_en, q.options
+                q.explanation_cn, q.explanation_en, q.options, q.retired_at, q.retired_reason
          FROM user_question_feedback f
          LEFT JOIN questions q ON q.id = f.question_id
          WHERE f.user_id = ANY($1::int[])
@@ -733,6 +815,8 @@ async function listUserFeedback(pool, {
             explanation_cn: row.explanation_cn || '',
             explanation_en: row.explanation_en || '',
             options: row.options || null,
+            retired_at: row.retired_at || null,
+            retired_reason: row.retired_reason || null,
         },
     }));
 }
@@ -1008,6 +1092,9 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
         }
     }
 
+    // A broken question (no single correct option) needs a human to retire it, so keep it pending.
+    if (category === 'wrong_question' && !hasCaeChange(question, proposed)) dismiss = false;
+
     if (dismiss || category === 'not_a_bug' || category === 'too_hard' || category === 'too_easy') {
         await pool.query(
             `UPDATE user_question_feedback
@@ -1265,6 +1352,9 @@ module.exports = {
     applyAgentsTriageResults,
     decideUserFeedback,
     listUserFeedback,
+    canRetireQuestions,
+    retireQuestionForFeedback,
+    unretireQuestionForFeedback,
     AUTO_APPLY,
     APPLY_MIN_CONFIDENCE,
 };

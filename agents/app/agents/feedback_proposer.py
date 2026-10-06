@@ -432,6 +432,10 @@ def propose_for_item(
                 "source": "llm",
             }
 
+    # A broken question (no single correct option) needs a human to retire it, so keep it pending.
+    if category == "wrong_question" and not has_cae_change(proposed):
+        dismiss = False
+
     return {
         "feedback_id": feedback_id,
         "question_id": question_id,

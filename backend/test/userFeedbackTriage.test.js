@@ -13,6 +13,10 @@ const {
     resolveGivenAnswerForOptions,
     decideUserFeedback,
     listUserFeedback,
+    canRetireQuestions,
+    retireQuestionForFeedback,
+    unretireQuestionForFeedback,
+    triageUserFeedbackById,
 } = require('../lib/userFeedbackTriage');
 
 describe('userFeedbackTriage math helpers', () => {
@@ -276,6 +280,113 @@ describe('accept with the given answer on bilingual options', () => {
         });
         await expect(decideUserFeedback(pool, { feedbackId: 11, userIds: [1], action: 'accept' }))
             .rejects.toMatchObject({ status: 400 });
+    });
+});
+
+describe('retire broken question (FS-20261005-retire-broken-question)', () => {
+    function makeRetirePool({ feedback, retiredAt = null }) {
+        const calls = [];
+        return {
+            calls,
+            async query(sql, params) {
+                const s = String(sql).replace(/\s+/g, ' ');
+                calls.push({ sql: s, params });
+                if (/FROM user_question_feedback WHERE id/i.test(s)) {
+                    return { rows: feedback && params[1].includes(feedback.user_id) ? [{ ...feedback }] : [] };
+                }
+                if (/UPDATE questions SET retired_at = COALESCE/i.test(s)) {
+                    return { rows: [{ id: feedback.question_id, retired_at: retiredAt || '2026-10-05T00:00:00Z' }] };
+                }
+                if (/UPDATE questions SET retired_at = NULL/i.test(s)) return { rows: [], rowCount: 1 };
+                if (/UPDATE user_question_feedback/i.test(s)) return { rows: [], rowCount: 1 };
+                throw new Error(`unexpected query: ${s}`);
+            },
+        };
+    }
+    const feedback = { id: 14, user_id: 1, question_id: 2642, status: 'acknowledged', proposed_fix: null };
+
+    it('allowlist is maxpan and panpanr, case-insensitive (AC-0)', () => {
+        expect(canRetireQuestions('maxpan')).toBe(true);
+        expect(canRetireQuestions('PanPanR')).toBe(true);
+        expect(canRetireQuestions('someone')).toBe(false);
+        expect(canRetireQuestions(null)).toBe(false);
+    });
+
+    it('non-allowlisted user gets 403 and nothing is written (AC-0)', async () => {
+        const pool = makeRetirePool({ feedback });
+        await expect(retireQuestionForFeedback(pool, { feedbackId: 14, userIds: [1], username: 'someone' }))
+            .rejects.toMatchObject({ status: 403 });
+        await expect(unretireQuestionForFeedback(pool, { feedbackId: 14, userIds: [1], username: 'someone' }))
+            .rejects.toMatchObject({ status: 403 });
+        expect(pool.calls).toHaveLength(0);
+    });
+
+    it('retire marks the question and dismisses the feedback; repeat keeps the first values (AC-1)', async () => {
+        const pool = makeRetirePool({ feedback });
+        const out = await retireQuestionForFeedback(pool, { feedbackId: 14, userIds: [1], username: 'panpanr', reason: 'tie' });
+        expect(out.question_id).toBe(2642);
+        const upd = pool.calls.find((c) => /UPDATE questions SET retired_at/i.test(c.sql));
+        expect(upd.sql).toMatch(/COALESCE\(retired_at, NOW\(\)\)/);
+        expect(upd.params).toEqual([2642, 'tie', 14]);
+        const fb = pool.calls.find((c) => /SET status = 'dismissed'/i.test(c.sql));
+        expect(JSON.parse(fb.params[1])).toEqual({ human_decision: 'retire' });
+    });
+
+    it('retire on someone else\'s feedback is 404 (AC-1)', async () => {
+        const pool = makeRetirePool({ feedback });
+        await expect(retireQuestionForFeedback(pool, { feedbackId: 14, userIds: [99], username: 'maxpan' }))
+            .rejects.toMatchObject({ status: 404 });
+    });
+
+    it('unretire clears the retired columns (AC-2)', async () => {
+        const pool = makeRetirePool({ feedback });
+        const out = await unretireQuestionForFeedback(pool, { feedbackId: 14, userIds: [1], username: 'maxpan' });
+        expect(out.question_id).toBe(2642);
+        expect(pool.calls.some((c) => /SET retired_at = NULL, retired_reason = NULL, retired_by_feedback_id = NULL/i.test(c.sql))).toBe(true);
+    });
+
+    it('list exposes retired_at and retired_reason on the question (AC-5)', async () => {
+        const pool = {
+            async query() {
+                return { rows: [{ id: 14, user_id: 1, question_id: 2642, status: 'dismissed', retired_at: '2026-10-05', retired_reason: 'tie' }] };
+            },
+        };
+        const [item] = await listUserFeedback(pool, { userIds: [1] });
+        expect(item.question.retired_at).toBe('2026-10-05');
+        expect(item.question.retired_reason).toBe('tie');
+    });
+
+    it('LLM wrong_question with no fix stays acknowledged even if it says dismiss (AC-7)', async () => {
+        const prevAgents = process.env.AGENTS_FEEDBACK_TRIAGE;
+        process.env.AGENTS_FEEDBACK_TRIAGE = '0';
+        const calls = [];
+        const question = {
+            q_id: 2642, content_cn: '估算', content_en: 'Estimate 238 x 41', metadata: { type: 'multiplication', nums: [238, 41], context: 'estimation' },
+            options: { zh: ['9400', '8600', '10000', '9800'], en: ['9,400', '8,600', '10,000', '9,800'] },
+            answer_cn: '9400', answer_en: '9,400', explanation_cn: '', explanation_en: '',
+        };
+        const pool = {
+            async query(sql, params) {
+                const s = String(sql).replace(/\s+/g, ' ');
+                calls.push({ sql: s, params });
+                if (/FROM user_question_feedback f LEFT JOIN questions/i.test(s)) {
+                    return { rows: [{ feedback_id: 14, question_id: 2642, category: 'wrong_answer', comment: 'tie', given_answer: '9,800', status: 'open', ...question }] };
+                }
+                return { rows: [], rowCount: 1 };
+            },
+        };
+        const llmJson = { category: 'wrong_question', dismiss: true, reason: 'No single correct option.', confidence: 0.9, proposed_fix: null };
+        try {
+            const out = await triageUserFeedbackById(pool, 14, {
+                aiClient: {},
+                createChatCompletionJson: async () => ({ choices: [{ message: { content: JSON.stringify(llmJson) } }] }),
+            });
+            expect(out.status).toBe('acknowledged');
+            expect(calls.some((c) => /SET status = 'dismissed'/i.test(c.sql))).toBe(false);
+        } finally {
+            if (prevAgents === undefined) delete process.env.AGENTS_FEEDBACK_TRIAGE;
+            else process.env.AGENTS_FEEDBACK_TRIAGE = prevAgents;
+        }
     });
 });
 

@@ -463,7 +463,7 @@ const {
     ensureUserQuestionFeedbackTable,
     insertUserQuestionFeedback,
 } = require('./lib/feedbackStore');
-const { queueUserFeedbackTriage, decideUserFeedback, listUserFeedback, triageUserFeedbackById, triageUserFeedbackBatch } = require('./lib/userFeedbackTriage');
+const { queueUserFeedbackTriage, decideUserFeedback, listUserFeedback, triageUserFeedbackById, triageUserFeedbackBatch, canRetireQuestions, retireQuestionForFeedback, unretireQuestionForFeedback } = require('./lib/userFeedbackTriage');
 const { registerDiagnosticRoutes, reportDiagnosticQuality } = require('./routes/diagnostic');
 
 // Postgres support (optional).
@@ -844,6 +844,16 @@ async function ensureTables() {
             await ensureUserQuestionFeedbackTable(pool);
         } catch (e) {
             console.warn('user_question_feedback ensure skipped (non-fatal).', e.message || e);
+        }
+        try {
+            await pool.query(
+                `ALTER TABLE questions
+                 ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ,
+                 ADD COLUMN IF NOT EXISTS retired_reason TEXT,
+                 ADD COLUMN IF NOT EXISTS retired_by_feedback_id INTEGER`
+            );
+        } catch (e) {
+            console.warn('questions.retired_* ensure skipped (non-fatal).', e.message || e);
         }
 
         // --- Knowledge points schema migration (legacy text id -> integer id; name -> name_cn/name_en) ---
@@ -1866,6 +1876,7 @@ async function dbFirstSelectAndMaybeGenerateWithGpt({
              WHERE 1=1
                AND q.grade_id = $2
                AND q.subject_id = $3
+               AND q.retired_at IS NULL
                AND NOT EXISTS (
                    SELECT 1 FROM history h
                    WHERE h.user_id = ANY($1::int[])
@@ -3215,6 +3226,7 @@ app.post('/api/generate/diagnostic__legacy', async (req, res) => {
                              knowledge_point_id = EXCLUDED.knowledge_point_id,
                              grade_id = EXCLUDED.grade_id,
                              subject_id = EXCLUDED.subject_id
+                         WHERE questions.retired_at IS NULL
                          RETURNING id`,
                             [
                                 q.content_cn,
@@ -3237,7 +3249,7 @@ app.post('/api/generate/diagnostic__legacy', async (req, res) => {
 
                     if (!Number.isInteger(insertedId)) {
                         try {
-                            const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 LIMIT 1', [q.content_options_hash]);
+                            const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 AND retired_at IS NULL LIMIT 1', [q.content_options_hash]);
                             insertedId = sel.rows[0] ? Number(sel.rows[0].id) : null;
                         } catch (e) {
                             insertedId = null;
@@ -3621,6 +3633,7 @@ app.post('/api/generate/practice', async (req, res) => {
                          knowledge_point_id = EXCLUDED.knowledge_point_id,
                          grade_id = EXCLUDED.grade_id,
                          subject_id = EXCLUDED.subject_id
+                         WHERE questions.retired_at IS NULL
                      RETURNING id`,
                     [
                         q.content_cn,
@@ -3643,7 +3656,7 @@ app.post('/api/generate/practice', async (req, res) => {
 
             if (!Number.isInteger(insertedId)) {
                 try {
-                    const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 LIMIT 1', [q.content_options_hash]);
+                    const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 AND retired_at IS NULL LIMIT 1', [q.content_options_hash]);
                     insertedId = sel.rows[0] ? Number(sel.rows[0].id) : null;
                 } catch {
                     insertedId = null;
@@ -4020,6 +4033,54 @@ app.post('/api/user-feedback', async (req, res) => {
     }
 });
 
+async function resolveFeedbackUser(tokenData) {
+    let userIds = [tokenData.id];
+    let username = null;
+    try {
+        const rUser = await pool.query('SELECT username FROM users WHERE id=$1', [tokenData.id]);
+        username = (rUser.rows[0] && rUser.rows[0].username) ? String(rUser.rows[0].username) : null;
+        if (username) {
+            const ids = await getUserIdsByUsername(username);
+            if (Array.isArray(ids) && ids.length) userIds = ids;
+        }
+    } catch {
+        userIds = [tokenData.id];
+    }
+    return { userIds, username };
+}
+
+function retireRoute(action) {
+    return async (req, res) => {
+        const auth = req.headers.authorization;
+        if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+        if (!useDb) return res.status(503).json({ error: 'Database required' });
+        try {
+            const data = jwt.verify(auth.replace('Bearer ', ''), JWT_SECRET);
+            const { userIds, username } = await resolveFeedbackUser(data);
+            const result = await action(pool, {
+                feedbackId: req.params.id,
+                userIds,
+                username,
+                reason: req.body && req.body.reason,
+            });
+            return res.json({ ok: true, ...result });
+        } catch (e) {
+            const status = e && e.status ? Number(e.status) : 0;
+            if (status === 403 || status === 404) {
+                return res.status(status).json({ error: e.message });
+            }
+            if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
+                return res.status(401).json({ error: 'Invalid token' });
+            }
+            console.error('[user-feedback] retire/unretire failed:', e && e.message ? e.message : e);
+            return res.status(500).json({ error: 'Failed to update question' });
+        }
+    };
+}
+
+app.post('/api/user-feedback/:id/retire', retireRoute(retireQuestionForFeedback));
+app.post('/api/user-feedback/:id/unretire', retireRoute(unretireQuestionForFeedback));
+
 // List current user's feedback for review UI (default: acknowledged).
 app.get('/api/user-feedback', async (req, res) => {
     const auth = req.headers.authorization;
@@ -4029,24 +4090,14 @@ app.get('/api/user-feedback', async (req, res) => {
     try {
         const token = auth.replace('Bearer ', '');
         const data = jwt.verify(token, JWT_SECRET);
-        let userIds = [data.id];
-        try {
-            const rUser = await pool.query('SELECT username FROM users WHERE id=$1', [data.id]);
-            const username = (rUser.rows[0] && rUser.rows[0].username) ? String(rUser.rows[0].username) : null;
-            if (username) {
-                const ids = await getUserIdsByUsername(username);
-                if (Array.isArray(ids) && ids.length) userIds = ids;
-            }
-        } catch {
-            userIds = [data.id];
-        }
+        const { userIds, username } = await resolveFeedbackUser(data);
 
         const status = req.query && req.query.status != null
             ? String(req.query.status)
             : 'all';
         const limit = req.query && req.query.limit != null ? Number(req.query.limit) : 50;
         const items = await listUserFeedback(pool, { userIds, status, limit });
-        return res.json({ items });
+        return res.json({ items, can_retire: canRetireQuestions(username) });
     } catch (e) {
         if (e && (e.name === 'JsonWebTokenError' || e.name === 'TokenExpiredError')) {
             return res.status(401).json({ error: 'Invalid token' });

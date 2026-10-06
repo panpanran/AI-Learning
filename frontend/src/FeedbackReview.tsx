@@ -37,7 +37,7 @@ type FeedbackItem = {
     proposed_fix: ProposedFix | null
     created_at?: string
     original: QuestionSnapshot | null
-    question: QuestionSnapshot
+    question: QuestionSnapshot & { retired_at?: string | null; retired_reason?: string | null }
 }
 
 const STATUS_FILTERS = ['all', 'open', 'acknowledged', 'applied', 'dismissed'] as const
@@ -186,6 +186,7 @@ export default function FeedbackReview() {
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
     const [busyId, setBusyId] = useState<number | null>(null)
     const [note, setNote] = useState('')
+    const [canRetire, setCanRetire] = useState(false)
 
     const load = useCallback(async () => {
         if (!token) return
@@ -198,8 +199,10 @@ export default function FeedbackReview() {
             })
             const rows: FeedbackItem[] = (r && r.data && Array.isArray(r.data.items)) ? r.data.items : []
             setItems(rows)
+            setCanRetire(Boolean(r && r.data && r.data.can_retire))
         } catch {
             setItems([])
+            setCanRetire(false)
             setNote(t('feedback_review_load_failed'))
         } finally {
             setLoading(false)
@@ -232,6 +235,27 @@ export default function FeedbackReview() {
             await load()
             if (action === 'accept') setNote(t('feedback_review_accepted'))
             else setNote(r?.data?.reverted ? t('feedback_review_reverted') : t('feedback_review_rejected'))
+        } catch (err: any) {
+            const msg = err?.response?.data?.error || t('feedback_review_action_failed')
+            setNote(String(msg))
+        } finally {
+            setBusyId(null)
+        }
+    }
+
+    const setRetired = async (id: number, retire: boolean) => {
+        if (!token || busyId != null) return
+        if (retire && !window.confirm(t('feedback_review_retire_confirm'))) return
+        setBusyId(id)
+        setNote('')
+        try {
+            await API.post(
+                `/api/user-feedback/${id}/${retire ? 'retire' : 'unretire'}`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+            )
+            await load()
+            setNote(retire ? t('feedback_review_retire_done') : t('feedback_review_unretire_done'))
         } catch (err: any) {
             const msg = err?.response?.data?.error || t('feedback_review_action_failed')
             setNote(String(msg))
@@ -383,6 +407,10 @@ export default function FeedbackReview() {
                         } else if (!hasProposedCae(p) && !givenOk) {
                             acceptHint = t('feedback_review_no_proposal')
                         }
+                        const retired = Boolean(q.retired_at)
+                        if (!retired && item.category === 'wrong_question' && !hasProposedCae(p)) {
+                            acceptHint = t('feedback_review_retire_suggest')
+                        }
 
                         return (
                             <div key={item.id} className="card" style={{ marginBottom: 12 }}>
@@ -402,6 +430,9 @@ export default function FeedbackReview() {
                                     <div className="meta" style={{ marginTop: 8 }}>
                                         {t('feedback_review_applied_hint')}
                                     </div>
+                                ) : null}
+                                {retired ? (
+                                    <div style={{ marginTop: 8, fontWeight: 700 }}>{t('feedback_review_retired_label')}</div>
                                 ) : null}
 
                                 <div style={{ marginTop: 8 }}>
@@ -507,6 +538,16 @@ export default function FeedbackReview() {
                                     >
                                         {t('feedback_review_reanalyze')}
                                     </button>
+                                    {canRetire && item.question_id != null ? (
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            disabled={busy}
+                                            onClick={() => setRetired(item.id, !retired)}
+                                        >
+                                            {retired ? t('feedback_review_unretire') : t('feedback_review_retire')}
+                                        </button>
+                                    ) : null}
                                 </div>
                                 {item.status === 'applied' ? (
                                     <div className="meta" style={{ marginTop: 8 }}>

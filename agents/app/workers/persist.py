@@ -124,3 +124,4 @@ def persist_question(
             )
             row = cur.fetchone()
             return int(row["id"]) if row and row.get("id") is not None else None
+                WHERE questions.retired_at IS NULL

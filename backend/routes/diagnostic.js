@@ -789,6 +789,7 @@ function registerDiagnosticRoutes({ app, deps }) {
                                      grade_id = EXCLUDED.grade_id,
                                      subject_id = EXCLUDED.subject_id
                                  RETURNING id`,
+                                 WHERE questions.retired_at IS NULL
                                 [
                                     q.content_cn,
                                     q.content_en,
@@ -810,7 +811,7 @@ function registerDiagnosticRoutes({ app, deps }) {
 
                         if (!Number.isInteger(insertedId)) {
                             try {
-                                const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 LIMIT 1', [q.content_options_hash]);
+                                const sel = await pool.query('SELECT id FROM questions WHERE content_options_hash=$1 AND retired_at IS NULL LIMIT 1', [q.content_options_hash]);
                                 insertedId = sel.rows[0] ? Number(sel.rows[0].id) : null;
                             } catch {
                                 insertedId = null;
