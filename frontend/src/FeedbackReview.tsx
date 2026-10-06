@@ -126,6 +126,27 @@ function normalizeAnswerText(s: string) {
     return String(s || '').trim().toLowerCase().replace(/,/g, '').replace(/\s+/g, ' ')
 }
 
+const NUMERIC_CONTINUATION = /[0-9./]/
+
+function startsWithAtBoundary(long: string, short: string) {
+    if (!long.startsWith(short)) return false
+    const next = long.charAt(short.length)
+    return !next || !NUMERIC_CONTINUATION.test(next)
+}
+
+function containsAtBoundary(hay: string, needle: string) {
+    let i = hay.indexOf(needle)
+    while (i >= 0) {
+        const before = i > 0 ? hay.charAt(i - 1) : ''
+        const after = hay.charAt(i + needle.length)
+        if ((!before || !NUMERIC_CONTINUATION.test(before)) && (!after || !NUMERIC_CONTINUATION.test(after))) {
+            return true
+        }
+        i = hay.indexOf(needle, i + 1)
+    }
+    return false
+}
+
 function optionMatchesGiven(option: string, given: string) {
     const x = normalizeAnswerText(option)
     const y = normalizeAnswerText(given)
@@ -133,8 +154,8 @@ function optionMatchesGiven(option: string, given: string) {
     if (x === y) return true
     const nx = Number(x)
     const ny = Number(y)
-    if (Number.isFinite(nx) && Number.isFinite(ny) && nx === ny) return true
-    return x.startsWith(y) || y.startsWith(x) || x.includes(y)
+    if (Number.isFinite(nx) && Number.isFinite(ny)) return nx === ny
+    return startsWithAtBoundary(x, y) || startsWithAtBoundary(y, x) || containsAtBoundary(x, y)
 }
 
 function canAcceptGivenAnswer(item: FeedbackItem): boolean {

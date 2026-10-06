@@ -25,6 +25,21 @@ describe('userFeedbackTriage math helpers', () => {
     it('matches numeric answers loosely', () => {
         expect(answersMatch('800', '800')).toBe(true);
         expect(answersMatch('800', '800 apples')).toBe(true);
+        expect(answersMatch('500个', '500')).toBe(true);
+    });
+
+    it('does not treat a numeric prefix as the same number', () => {
+        expect(answersMatch('500', '50')).toBe(false);
+        expect(answersMatch('50', '5')).toBe(false);
+        expect(answersMatch('3/4', '3')).toBe(false);
+        expect(answersMatch('0.5', '0')).toBe(false);
+        expect(answersMatch('500个', '50')).toBe(false);
+    });
+
+    it('picks the exact place-value option, not a prefix of it', () => {
+        const options = { zh: ['5', '50', '500', '5000'], en: ['5', '50', '500', '5000'] };
+        expect(resolveGivenAnswerForOptions(options, '500')).toEqual({ answer_cn: '500', answer_en: '500' });
+        expect(resolveGivenAnswerForOptions({ zh: ['5000', '5'] }, '50')).toBeNull();
     });
 
     it('auto-applies when bank answer wrong and option exists', () => {

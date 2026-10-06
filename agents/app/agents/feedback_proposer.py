@@ -20,6 +20,30 @@ def normalize_answer_text(s: Any) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+# A digit, '.' or '/' right after a numeric match means a different number ("500" is not "50", "3/4" is not "3").
+_NUMERIC_CONTINUATION = re.compile(r"[0-9./]")
+
+
+def _starts_with_at_boundary(long: str, short: str) -> bool:
+    if not long.startswith(short):
+        return False
+    nxt = long[len(short):len(short) + 1]
+    return not nxt or not _NUMERIC_CONTINUATION.match(nxt)
+
+
+def _contains_at_boundary(hay: str, needle: str) -> bool:
+    i = hay.find(needle)
+    while i >= 0:
+        before = hay[i - 1] if i > 0 else ""
+        after = hay[i + len(needle):i + len(needle) + 1]
+        if (not before or not _NUMERIC_CONTINUATION.match(before)) and (
+            not after or not _NUMERIC_CONTINUATION.match(after)
+        ):
+            return True
+        i = hay.find(needle, i + 1)
+    return False
+
+
 def answers_match(a: Any, b: Any) -> bool:
     x = normalize_answer_text(a)
     y = normalize_answer_text(b)
@@ -28,13 +52,10 @@ def answers_match(a: Any, b: Any) -> bool:
     if x == y:
         return True
     try:
-        nx = float(x)
-        ny = float(y)
-        if nx == ny:
-            return True
+        return float(x) == float(y)
     except ValueError:
         pass
-    return x.startswith(y) or y.startswith(x)
+    return _starts_with_at_boundary(x, y) or _starts_with_at_boundary(y, x)
 
 
 def parse_metadata(raw: Any) -> dict[str, Any] | None:
@@ -114,7 +135,7 @@ def find_matching_option(options: Any, expected: Any) -> str | None:
             return t
     exp = normalize_answer_text(expected)
     for t in texts:
-        if exp and exp in normalize_answer_text(t):
+        if exp and _contains_at_boundary(normalize_answer_text(t), exp):
             return t
     return None
 

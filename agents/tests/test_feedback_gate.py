@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 from app.agents.feedback_proposer import (
+    answers_match,
     build_math_proposed_fix,
     can_auto_apply_llm,
     can_auto_apply_math,
     compute_math_result,
+    find_matching_option,
 )
 from app.models import FeedbackTriageItemIn, FeedbackTriageRequest
 from app.orchestrators.feedback_triage import run_feedback_triage
+
+
+def test_answers_match_rejects_numeric_prefix():
+    assert answers_match("800", "800 apples")
+    assert answers_match("500个", "500")
+    assert not answers_match("500", "50")
+    assert not answers_match("3/4", "3")
+    assert find_matching_option(["5", "50", "500", "5000"], "500") == "500"
+    assert find_matching_option(["5000", "5"], "50") is None
 
 
 def test_compute_math_multiplication():

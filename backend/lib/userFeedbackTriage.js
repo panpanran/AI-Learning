@@ -23,6 +23,28 @@ function normalizeAnswerText(s) {
         .replace(/\s+/g, ' ');
 }
 
+// A digit, '.' or '/' right after a numeric match means a different number ("500" is not "50", "3/4" is not "3").
+const NUMERIC_CONTINUATION = /[0-9./]/;
+
+function startsWithAtBoundary(long, short) {
+    if (!long.startsWith(short)) return false;
+    const next = long.charAt(short.length);
+    return !next || !NUMERIC_CONTINUATION.test(next);
+}
+
+function containsAtBoundary(hay, needle) {
+    let i = hay.indexOf(needle);
+    while (i >= 0) {
+        const before = i > 0 ? hay.charAt(i - 1) : '';
+        const after = hay.charAt(i + needle.length);
+        if ((!before || !NUMERIC_CONTINUATION.test(before)) && (!after || !NUMERIC_CONTINUATION.test(after))) {
+            return true;
+        }
+        i = hay.indexOf(needle, i + 1);
+    }
+    return false;
+}
+
 function answersMatch(a, b) {
     const x = normalizeAnswerText(a);
     const y = normalizeAnswerText(b);
@@ -30,10 +52,9 @@ function answersMatch(a, b) {
     if (x === y) return true;
     const nx = Number(x);
     const ny = Number(y);
-    if (Number.isFinite(nx) && Number.isFinite(ny) && nx === ny) return true;
-    // allow "800" vs "800 apples"
-    if (x.startsWith(y) || y.startsWith(x)) return true;
-    return false;
+    if (Number.isFinite(nx) && Number.isFinite(ny)) return nx === ny;
+    // allow "800" vs "800 apples" / "500个"
+    return startsWithAtBoundary(x, y) || startsWithAtBoundary(y, x);
 }
 
 function historyAnswerIsCorrect(given, answerCn, answerEn) {
@@ -169,9 +190,10 @@ function findMatchingOption(options, expected) {
     }
     // Prefer option that contains the numeric expected as whole token
     const exp = normalizeAnswerText(expected);
+    if (!exp) return null;
     for (const t of texts) {
         const n = normalizeAnswerText(t);
-        if (n.includes(exp)) return t;
+        if (containsAtBoundary(n, exp)) return t;
     }
     return null;
 }
