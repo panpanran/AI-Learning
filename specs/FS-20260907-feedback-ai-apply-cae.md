@@ -28,6 +28,7 @@
 3. **AC-3** — Given low confidence, dismiss, or answer not in options, When triage finishes, Then `questions` is unchanged and status is `acknowledged` or `dismissed`.
 4. **AC-4** — Given math metadata with verifiable nums, When bank answer is wrong, Then deterministic math still wins for `answer_*` (explanations/content may still come from LLM).
 5. **AC-5** (fix 2026-10-05, user bug report in chat) — Given answers that differ only by a numeric continuation (bank `50`, given `500`; `3` vs `3/4`), When the answer matcher runs (Node `answersMatch` / `findMatchingOption`, Python `answers_match` / `find_matching_option`, frontend `optionMatchesGiven`), Then they do not match. Prefix / substring matches count only at a numeric boundary (`500个` still matches `500`). Previously feedback Q2666 was dismissed as "Bank answer already matches the given answer" and Accept would have picked option `5`.
+6. **AC-6** (fix 2026-10-05, user bug report on feedback #14 / Q2642) — Given metadata `context` mentioning estimation / rounding (`estimat`, `round`, `approx`, `估算`, `四舍五入`, `近似`), When triage runs, Then the deterministic math check is skipped (exact 238×41=9758 is not the answer to an estimate). Given a computed result that matches no option, Then no math proposal is made and the LLM decides. The LLM prompt (Node + Python) says: if no option is correct or two tie, set `category=wrong_question`, `proposed_fix=null`.
 
 ## 7. AC → verification map
 
@@ -38,6 +39,7 @@
 | AC-3 | Unit: answer not in options / low conf rejected | **pass** |
 | AC-4 | Math helpers unchanged | **pass** |
 | AC-5 | vitest "does not treat a numeric prefix as the same number", "picks the exact place-value option"; Python `test_answers_match_rejects_numeric_prefix` | **pass** |
+| AC-6 | vitest "skips exact math for estimation questions"; Python `test_compute_math_skips_estimation`; out-of-options guard and prompt change by code review only | **pass** (partial: guard + prompt not unit-tested) |
 
 ## 10. As-built
 
@@ -50,3 +52,4 @@
 - vitest CAE + math suites
 - `triage_open_user_feedback.js --include-acknowledged` → `applied` feedback_id 1 / question_id 2186
 - 2026-10-05 AC-5: `backend> npm test` 27/27 pass; Python matcher asserts run via `python -c` (pytest not installed locally, so the pytest file itself was not executed); `frontend> npm run build` built. `tsc --noEmit` reports one existing error in `QuestionChart.tsx`, unrelated and unchanged.
+- 2026-10-05 AC-6: `backend> npm test` 28/28 pass; Python asserts via `python -c` (pytest not installed).

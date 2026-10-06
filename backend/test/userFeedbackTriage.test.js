@@ -22,6 +22,12 @@ describe('userFeedbackTriage math helpers', () => {
         expect(computeMathResult({ type: 'division', nums: [12, 3] })).toBe('4');
     });
 
+    it('skips exact math for estimation questions', () => {
+        expect(computeMathResult({ type: 'multiplication', nums: [238, 41], context: 'estimation' })).toBeNull();
+        expect(computeMathResult({ type: 'addition', nums: [548, 639], context: '四舍五入到百位' })).toBeNull();
+        expect(computeMathResult({ type: 'multiplication', nums: [238, 41], context: 'word problem' })).toBe('9758');
+    });
+
     it('matches numeric answers loosely', () => {
         expect(answersMatch('800', '800')).toBe(true);
         expect(answersMatch('800', '800 apples')).toBe(true);

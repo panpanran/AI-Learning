@@ -70,8 +70,14 @@ def parse_metadata(raw: Any) -> dict[str, Any] | None:
         return None
 
 
+# Estimation questions are answered from rounded operands, so the exact result is not the bank answer.
+_ESTIMATION_CONTEXT = re.compile(r"estimat|round|approx|估算|四舍五入|近似", re.IGNORECASE)
+
+
 def compute_math_result(metadata: dict[str, Any] | None) -> str | None:
     if not metadata:
+        return None
+    if _ESTIMATION_CONTEXT.search(str(metadata.get("context") or "")):
         return None
     typ = str(metadata.get("type") or "").lower()
     nums_raw = metadata.get("nums")
@@ -288,6 +294,8 @@ def llm_propose_fix(
                     "You may fix ONLY these fields: question stem (content), correct answer, and explanation "
                     "(both Chinese and English). Do NOT invent new options, change option lists, KP, or metadata. "
                     "If the answer changes, it MUST match an existing option text. "
+                    "If no existing option is correct, or two options are equally correct (a tie), do NOT pick one: "
+                    "set category=wrong_question, dismiss=false, proposed_fix=null, and say in reason that the options have no single correct answer. "
                     "Rounding: tens digit 0-4 → round down; 5-9 → round up. Example: 548→500, 639→600, sum=1100. "
                     "reason must be ONE short coherent sentence (max 200 chars). Never contradict yourself. "
                     "If bank answer+explanation are already correct, set dismiss=true, category=not_a_bug, proposed_fix=null. "
@@ -379,7 +387,11 @@ def propose_for_item(
         stored_ok = answers_match(question.get("answer_cn"), expected) or answers_match(
             question.get("answer_en"), expected
         )
-        if not stored_ok:
+        # A computed value outside the options cannot be the bank answer; leave the call to the LLM.
+        in_options = not question.get("options") or bool(
+            find_matching_option(question.get("options"), expected)
+        )
+        if not stored_ok and in_options:
             proposed = build_math_proposed_fix(question, expected)
             category = "wrong_answer"
 

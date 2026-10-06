@@ -21,6 +21,11 @@ def test_answers_match_rejects_numeric_prefix():
     assert find_matching_option(["5000", "5"], "50") is None
 
 
+def test_compute_math_skips_estimation():
+    assert compute_math_result({"type": "multiplication", "nums": [238, 41], "context": "estimation"}) is None
+    assert compute_math_result({"type": "multiplication", "nums": [238, 41]}) == "9758"
+
+
 def test_compute_math_multiplication():
     assert compute_math_result({"type": "multiplication", "nums": [12, 8]}) == "96"
 

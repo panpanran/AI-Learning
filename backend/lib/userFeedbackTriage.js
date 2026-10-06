@@ -134,9 +134,13 @@ function parseMetadata(raw) {
     }
 }
 
+// Estimation questions are answered from rounded operands, so the exact result is not the bank answer.
+const ESTIMATION_CONTEXT = /estimat|round|approx|估算|四舍五入|近似/i;
+
 function computeMathResult(metadata) {
     const meta = metadata && typeof metadata === 'object' ? metadata : null;
     if (!meta) return null;
+    if (ESTIMATION_CONTEXT.test(String(meta.context || ''))) return null;
     const type = meta.type != null ? String(meta.type).toLowerCase() : '';
     const nums = Array.isArray(meta.nums)
         ? meta.nums.map((n) => Number(n)).filter((n) => Number.isFinite(n))
@@ -281,6 +285,8 @@ async function llmProposeFix({ aiClient, createChatCompletionJson, question, fee
                     + 'You may fix ONLY these fields: question stem (content), correct answer, and explanation '
                     + '(both Chinese and English). Do NOT invent new options, change option lists, KP, or metadata. '
                     + 'If the correct answer changes, it MUST be exactly one of the existing options. '
+                    + 'If no existing option is correct, or two options are equally correct (a tie), do NOT pick one: '
+                    + 'set category=wrong_question, dismiss=false, proposed_fix=null, and say in reason that the options have no single correct answer. '
                     + 'Rounding rule: look at the tens digit; if it is 0-4 round down to the lower hundred, if 5-9 round up. '
                     + 'Example: 548→500, 639→600, sum=1100. '
                     + 'reason must be ONE short coherent sentence (max 200 chars). Never contradict yourself. '
@@ -953,7 +959,9 @@ async function triageUserFeedbackLocally(pool, item, deps = {}) {
     if (expected) {
         const storedOk =
             answersMatch(question.answer_cn, expected) || answersMatch(question.answer_en, expected);
-        if (!storedOk) {
+        // A computed value outside the options cannot be the bank answer; leave the call to the LLM.
+        const inOptions = !question.options || Boolean(findMatchingOption(question.options, expected));
+        if (!storedOk && inOptions) {
             proposed = buildMathProposedFix(question, expected);
             category = 'wrong_answer';
         }
